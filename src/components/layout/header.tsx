@@ -21,6 +21,7 @@ import { ModeToggle } from "@/components/layout/mode-toggle";
 const pageTitles: Record<string, string> = {
   "/dashboard": "dashboard",
   "/inbox": "inbox",
+  "/inbox-custom": "inboxCustom",
   "/notifications": "notifications",
   "/contacts": "contacts",
   "/pipelines": "pipelines",
@@ -32,9 +33,11 @@ const pageTitles: Record<string, string> = {
 
 function getPageTitleKey(pathname: string): string {
   if (pageTitles[pathname]) return pageTitles[pathname];
-  const match = Object.entries(pageTitles).find(([path]) =>
-    pathname.startsWith(path),
-  );
+  // Prefer the longest matching prefix so `/inbox-custom` doesn't
+  // resolve to the `/inbox` title.
+  const match = Object.entries(pageTitles)
+    .filter(([path]) => pathname.startsWith(`${path}/`) || pathname === path)
+    .sort((a, b) => b[0].length - a[0].length)[0];
   return match ? match[1] : "dashboard";
 }
 

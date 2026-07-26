@@ -93,6 +93,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { href: "/dashboard", labelKey: "dashboard", icon: LayoutDashboard },
   { href: "/inbox", labelKey: "inbox", icon: MessageSquare },
+  { href: "/inbox-custom", labelKey: "inboxCustom", icon: MessageSquare },
   { href: "/notifications", labelKey: "notifications", icon: Bell },
   { href: "/contacts", labelKey: "contacts", icon: Users },
   { href: "/pipelines", labelKey: "pipelines", icon: GitBranch },
@@ -213,7 +214,8 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
             {navItems.map((item) => {
               const isActive =
                 pathname === item.href ||
-                (item.href !== "/dashboard" && pathname.startsWith(item.href));
+                (item.href !== "/dashboard" &&
+                  pathname.startsWith(`${item.href}/`));
 
               const showUnreadDot =
                 item.href === "/inbox" && totalUnread > 0 && !isActive;

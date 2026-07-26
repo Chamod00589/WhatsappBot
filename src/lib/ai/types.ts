@@ -6,7 +6,21 @@
 // whether the account is on OpenAI or Anthropic.
 // ============================================================
 
-export type AiProvider = 'openai' | 'anthropic'
+export type AiProvider = 'openai' | 'anthropic' | 'openrouter'
+
+/** Providers accepted by the AI config / test APIs. */
+export const AI_PROVIDERS: readonly AiProvider[] = [
+  'openai',
+  'anthropic',
+  'openrouter',
+] as const
+
+export function isAiProvider(value: unknown): value is AiProvider {
+  return (
+    typeof value === 'string' &&
+    (AI_PROVIDERS as readonly string[]).includes(value)
+  )
+}
 
 /**
  * Account AI setup, decrypted and ready to use. Produced by
