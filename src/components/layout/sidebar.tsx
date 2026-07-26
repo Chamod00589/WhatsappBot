@@ -13,6 +13,7 @@ import {
   Crown,
   GitBranch,
   LayoutDashboard,
+  ScanSearch,
   LogOut,
   MessageSquare,
   Radio,
@@ -99,6 +100,7 @@ const navItems: NavItem[] = [
   { href: "/automations", labelKey: "automations", icon: Zap },
   { href: "/flows", labelKey: "flows", icon: Workflow, beta: true },
   { href: "/agents", labelKey: "aiAgents", icon: Bot },
+  { href: "/identify", labelKey: "identify", icon: ScanSearch },
 ];
 
 const bottomNavItems = [
