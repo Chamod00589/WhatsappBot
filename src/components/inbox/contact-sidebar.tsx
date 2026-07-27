@@ -3,9 +3,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { addContactTag, deleteContactTag } from "@/lib/contacts/tag-api";
-import { toast } from "sonner";
-import type { Contact, Deal, ContactNote, Tag } from "@/types";
+import type {
+  Contact,
+  Deal,
+  ContactNote,
+  ConversationStatus,
+} from "@/types";
 import {
   Phone,
   Mail,
@@ -21,14 +24,41 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { format } from "date-fns";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
+import { ContactTagChips } from "@/components/inbox/contact-tag-chips";
+import { ConversationThreadControls } from "@/components/inbox/conversation-thread-controls";
 
 interface ContactSidebarProps {
   contact: Contact | null;
   /** Optional className for the outer shell (mobile sheet vs desktop column). */
   className?: string;
+  /**
+   * When set (mobile contact sheet), show status / assign / refresh here
+   * instead of the thread header.
+   */
+  conversationControls?: {
+    conversationId: string;
+    status: ConversationStatus;
+    assignedAgentId: string | null;
+    onStatusChange: (
+      conversationId: string,
+      status: ConversationStatus,
+    ) => void;
+    onAssignChange: (
+      conversationId: string,
+      assignedAgentId: string | null,
+    ) => void;
+    onRefresh?: () => void;
+  } | null;
+  /** Bump when the sheet opens so tags refetch after header edits. */
+  tagsRefreshKey?: number;
 }
 
-export function ContactSidebar({ contact, className }: ContactSidebarProps) {
+export function ContactSidebar({
+  contact,
+  className,
+  conversationControls,
+  tagsRefreshKey = 0,
+}: ContactSidebarProps) {
   const tSidebar = useTranslations("Inbox.sidebar");
   const tThread = useTranslations("Inbox.messageThread");
 
@@ -36,9 +66,6 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
   const [copied, setCopied] = useState(false);
   const [deals, setDeals] = useState<Deal[]>([]);
   const [notes, setNotes] = useState<ContactNote[]>([]);
-  const [assignedTags, setAssignedTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
-  const [allTags, setAllTags] = useState<Tag[]>([]);
-  const [savingTagId, setSavingTagId] = useState<string | null>(null);
   const [newNote, setNewNote] = useState("");
   const [addingNote, setAddingNote] = useState(false);
 
@@ -47,7 +74,7 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
 
     const supabase = createClient();
 
-    const [dealsRes, notesRes, tagsRes, allTagsRes] = await Promise.all([
+    const [dealsRes, notesRes] = await Promise.all([
       supabase
         .from("deals")
         .select("*, stage:pipeline_stages(*)")
@@ -58,41 +85,11 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
         .select("*")
         .eq("contact_id", contact.id)
         .order("created_at", { ascending: false }),
-      supabase
-        .from("contact_tags")
-        .select("id, tag_id, tags(*)")
-        .eq("contact_id", contact.id),
-      (() => {
-        let q = supabase
-          .from("tags")
-          .select("*")
-          .order("sort_order", { ascending: true })
-          .order("created_at", { ascending: true });
-        if (accountId) q = q.eq("account_id", accountId);
-        return q;
-      })(),
     ]);
 
     if (dealsRes.data) setDeals(dealsRes.data);
     if (notesRes.data) setNotes(notesRes.data);
-    if (allTagsRes.error) {
-      console.error("Failed to load tags:", allTagsRes.error);
-      setAllTags([]);
-    } else if (allTagsRes.data) {
-      setAllTags(allTagsRes.data);
-    }
-    if (tagsRes.data) {
-      const mapped = tagsRes.data
-        .filter((ct: Record<string, unknown>) => ct.tags)
-        .map((ct: Record<string, unknown>) => ({
-          ...(ct.tags as Tag),
-          contact_tag_id: ct.id as string,
-        }));
-      setAssignedTags(mapped);
-    } else {
-      setAssignedTags([]);
-    }
-  }, [contact, accountId]);
+  }, [contact]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -105,35 +102,6 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }, [contact]);
-
-  const handleToggleTag = useCallback(
-    async (tag: Tag) => {
-      if (!contact) return;
-      const assigned = assignedTags.some((t) => t.id === tag.id);
-      setSavingTagId(tag.id);
-      try {
-        if (assigned) {
-          await deleteContactTag(contact.id, tag.id);
-          setAssignedTags((prev) => prev.filter((t) => t.id !== tag.id));
-        } else {
-          await addContactTag(contact.id, tag.id);
-          setAssignedTags((prev) => [
-            ...prev,
-            { ...tag, contact_tag_id: `temp-${tag.id}` },
-          ]);
-          // Refresh to get real contact_tag_id
-          await fetchContactData();
-        }
-      } catch (err) {
-        toast.error(
-          err instanceof Error ? err.message : tSidebar("tagUpdateFailed"),
-        );
-      } finally {
-        setSavingTagId(null);
-      }
-    },
-    [contact, assignedTags, fetchContactData, tSidebar],
-  );
 
   const handleAddNote = useCallback(async () => {
     if (!contact || !newNote.trim()) return;
@@ -172,14 +140,15 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
           className,
         )}
       >
-        <p className="text-sm text-muted-foreground">{tThread("selectConversation")}</p>
+        <p className="text-sm text-muted-foreground">
+          {tThread("selectConversation")}
+        </p>
       </div>
     );
   }
 
   const displayName = contact.name || contact.phone;
   const initials = displayName.charAt(0).toUpperCase();
-  const assignedIds = new Set(assignedTags.map((t) => t.id));
 
   return (
     <div
@@ -211,7 +180,25 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
             )}
           </div>
 
-          <div className="mt-4 space-y-2">
+          {/* Mobile: status / assign / refresh live here (hidden from header). */}
+          {conversationControls && (
+            <>
+              <div className="mt-4">
+                <ConversationThreadControls
+                  conversationId={conversationControls.conversationId}
+                  status={conversationControls.status}
+                  assignedAgentId={conversationControls.assignedAgentId}
+                  onStatusChange={conversationControls.onStatusChange}
+                  onAssignChange={conversationControls.onAssignChange}
+                  onRefresh={conversationControls.onRefresh}
+                  layout="row"
+                />
+              </div>
+              <div className="my-4 border-t border-border" />
+            </>
+          )}
+
+          <div className={cn("space-y-2", !conversationControls && "mt-4")}>
             <button
               type="button"
               onClick={handleCopyPhone}
@@ -236,7 +223,6 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
 
           <div className="my-4 border-t border-border" />
 
-          {/* Tags — click to assign / unassign */}
           <div>
             <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
               <TagIcon className="h-3 w-3" />
@@ -245,43 +231,12 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
             <p className="mt-1 px-1 text-[10px] text-muted-foreground">
               {tSidebar("tagsHint")}
             </p>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {allTags.length === 0 ? (
-                <p className="px-1 text-xs text-muted-foreground">
-                  {tSidebar("noTagsDefined")}
-                </p>
-              ) : (
-                allTags.map((tag) => {
-                  const selected = assignedIds.has(tag.id);
-                  const busy = savingTagId === tag.id;
-                  return (
-                    <button
-                      key={tag.id}
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void handleToggleTag(tag)}
-                      title={
-                        selected
-                          ? tSidebar("unassignTag", { name: tag.name })
-                          : tSidebar("assignTag", { name: tag.name })
-                      }
-                      className={cn(
-                        "rounded-full px-2.5 py-1 text-[10px] font-medium transition-all",
-                        selected
-                          ? "ring-2 ring-primary ring-offset-1 ring-offset-card"
-                          : "opacity-45 hover:opacity-90",
-                        busy && "opacity-60",
-                      )}
-                      style={{
-                        backgroundColor: `${tag.color}20`,
-                        color: tag.color,
-                      }}
-                    >
-                      {tag.name}
-                    </button>
-                  );
-                })
-              )}
+            <div className="mt-2">
+              <ContactTagChips
+                contactId={contact.id}
+                variant="panel"
+                refreshKey={tagsRefreshKey}
+              />
             </div>
           </div>
 
@@ -294,11 +249,15 @@ export function ContactSidebar({ contact, className }: ContactSidebarProps) {
             </div>
             <div className="mt-2 space-y-2">
               {deals.length === 0 ? (
-                <p className="px-1 text-xs text-muted-foreground">{tSidebar("noDeals")}</p>
+                <p className="px-1 text-xs text-muted-foreground">
+                  {tSidebar("noDeals")}
+                </p>
               ) : (
                 deals.map((deal) => (
                   <div key={deal.id} className="rounded-lg bg-muted px-3 py-2">
-                    <p className="text-sm font-medium text-foreground">{deal.title}</p>
+                    <p className="text-sm font-medium text-foreground">
+                      {deal.title}
+                    </p>
                     <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
                       <span>
                         {deal.currency ?? "$"}

@@ -1076,22 +1076,61 @@ export interface DownloadMediaArgs {
   accessToken: string
 }
 
+export class MediaDownloadTimeoutError extends Error {
+  constructor() {
+    super('Media download timed out')
+    this.name = 'MediaDownloadTimeoutError'
+  }
+}
+
+function isMediaTimeoutError(err: unknown): boolean {
+  if (err instanceof MediaDownloadTimeoutError) return true
+  if (err instanceof Error && err.name === 'TimeoutError') return true
+  const code =
+    err && typeof err === 'object' && 'code' in err
+      ? String((err as { code?: string }).code)
+      : ''
+  const cause =
+    err && typeof err === 'object' && 'cause' in err
+      ? (err as { cause?: { code?: string; name?: string; message?: string } }).cause
+      : undefined
+  const causeCode = cause?.code ? String(cause.code) : ''
+  const message = err instanceof Error ? err.message : String(err)
+  return (
+    code === 'UND_ERR_BODY_TIMEOUT' ||
+    causeCode === 'UND_ERR_BODY_TIMEOUT' ||
+    /Body Timeout|terminated|aborted|timeout/i.test(message) ||
+    /Body Timeout|timeout/i.test(cause?.message ?? '')
+  )
+}
+
 /**
  * Fetch the binary bytes for a media URL obtained from getMediaUrl.
  * Step two of the media-proxy flow.
+ *
+ * Caps the wait at 3 minutes so a stalled Meta CDN transfer fails cleanly
+ * as MediaDownloadTimeoutError instead of leaving the route hanging.
  */
 export async function downloadMedia(
   args: DownloadMediaArgs
 ): Promise<{ buffer: Buffer; contentType: string }> {
   const { downloadUrl, accessToken } = args
-  const response = await fetch(downloadUrl, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  })
-  if (!response.ok) {
-    throw new Error(`Media download failed: ${response.status}`)
+  try {
+    const response = await fetch(downloadUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(180_000),
+    })
+    if (!response.ok) {
+      throw new Error(`Media download failed: ${response.status}`)
+    }
+    const contentType =
+      response.headers.get('content-type') || 'application/octet-stream'
+    const buffer = Buffer.from(await response.arrayBuffer())
+    return { buffer, contentType }
+  } catch (err) {
+    if (isMediaTimeoutError(err)) {
+      throw new MediaDownloadTimeoutError()
+    }
+    throw err
   }
-  const contentType =
-    response.headers.get('content-type') || 'application/octet-stream'
-  const buffer = Buffer.from(await response.arrayBuffer())
-  return { buffer, contentType }
 }

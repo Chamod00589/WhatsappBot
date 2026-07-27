@@ -76,6 +76,7 @@ function InboxPageInner() {
    */
   const [contactPanelOpen, setContactPanelOpen] = useState(true);
   const [mobileContactOpen, setMobileContactOpen] = useState(false);
+  const [tagsRefreshKey, setTagsRefreshKey] = useState(0);
   useEffect(() => {
     try {
       const stored = localStorage.getItem(CONTACT_PANEL_STORAGE_KEY);
@@ -98,6 +99,7 @@ function InboxPageInner() {
   }, []);
 
   const handleOpenMobileContact = useCallback(() => {
+    setTagsRefreshKey((n) => n + 1);
     setMobileContactOpen(true);
   }, []);
 
@@ -645,13 +647,30 @@ function InboxPageInner() {
           </div>
         )}
 
-        {/* Mobile contact sheet — opened from the thread header User button. */}
+        {/* Mobile contact sheet — opened by tapping the avatar. */}
         <Sheet open={mobileContactOpen} onOpenChange={setMobileContactOpen}>
           <SheetContent side="right" className="w-full p-0 sm:max-w-sm lg:hidden">
             <SheetHeader className="sr-only">
               <SheetTitle>Contact</SheetTitle>
             </SheetHeader>
-            <ContactSidebar contact={activeContact} className="border-l-0" />
+            <ContactSidebar
+              contact={activeContact}
+              className="border-l-0"
+              tagsRefreshKey={tagsRefreshKey}
+              conversationControls={
+                activeConversation
+                  ? {
+                      conversationId: activeConversation.id,
+                      status: activeConversation.status,
+                      assignedAgentId:
+                        activeConversation.assigned_agent_id ?? null,
+                      onStatusChange: handleStatusChange,
+                      onAssignChange: handleAssignChange,
+                      onRefresh: handleManualRefresh,
+                    }
+                  : null
+              }
+            />
           </SheetContent>
         </Sheet>
       </div>

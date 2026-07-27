@@ -81,6 +81,7 @@ function InboxCustomPageInner() {
    */
   const [contactPanelOpen, setContactPanelOpen] = useState(true);
   const [mobileContactOpen, setMobileContactOpen] = useState(false);
+  const [tagsRefreshKey, setTagsRefreshKey] = useState(0);
   useEffect(() => {
     try {
       const stored = localStorage.getItem(CONTACT_PANEL_STORAGE_KEY);
@@ -103,6 +104,7 @@ function InboxCustomPageInner() {
   }, []);
 
   const handleOpenMobileContact = useCallback(() => {
+    setTagsRefreshKey((n) => n + 1);
     setMobileContactOpen(true);
   }, []);
 
@@ -655,7 +657,24 @@ function InboxCustomPageInner() {
             <SheetHeader className="sr-only">
               <SheetTitle>Contact</SheetTitle>
             </SheetHeader>
-            <ContactSidebar contact={activeContact} className="border-l-0" />
+            <ContactSidebar
+              contact={activeContact}
+              className="border-l-0"
+              tagsRefreshKey={tagsRefreshKey}
+              conversationControls={
+                activeConversation
+                  ? {
+                      conversationId: activeConversation.id,
+                      status: activeConversation.status,
+                      assignedAgentId:
+                        activeConversation.assigned_agent_id ?? null,
+                      onStatusChange: handleStatusChange,
+                      onAssignChange: handleAssignChange,
+                      onRefresh: handleManualRefresh,
+                    }
+                  : null
+              }
+            />
           </SheetContent>
         </Sheet>
       </div>

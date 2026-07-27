@@ -56,13 +56,25 @@ export function PresenceHeartbeat() {
       const t = Date.now();
       if (t - lastBeatAt < 1_000) return;
       lastBeatAt = t;
-      const { error } = await supabase.rpc("touch_presence", {
-        p_status: currentStatus(),
-      });
-      if (error && !cancelled) {
-        // Non-fatal: presence is best-effort. Log once per failure so a
-        // misconfigured RPC is visible without spamming.
-        console.error("[PresenceHeartbeat] touch_presence failed:", error.message);
+      try {
+        const { error } = await supabase.rpc("touch_presence", {
+          p_status: currentStatus(),
+        });
+        if (error && !cancelled) {
+          // Non-fatal: presence is best-effort. Network blips during
+          // heavy media downloads are common — don't spam the console.
+          const msg = error.message || "";
+          if (!/failed to fetch|network|abort/i.test(msg)) {
+            console.error("[PresenceHeartbeat] touch_presence failed:", msg);
+          }
+        }
+      } catch (err) {
+        // fetch() threw (offline / server restart). Silent — next beat retries.
+        if (cancelled) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/failed to fetch|network|abort/i.test(msg)) {
+          console.error("[PresenceHeartbeat] touch_presence failed:", msg);
+        }
       }
     };
 

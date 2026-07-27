@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
+import {
+  getMediaUrl,
+  downloadMedia,
+  MediaDownloadTimeoutError,
+} from '@/lib/whatsapp/meta-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 
 export async function GET(
@@ -81,6 +85,13 @@ export async function GET(
       },
     })
   } catch (error) {
+    if (error instanceof MediaDownloadTimeoutError) {
+      console.warn('WhatsApp media download timed out')
+      return NextResponse.json(
+        { error: 'Media download timed out' },
+        { status: 504 }
+      )
+    }
     console.error('Error in WhatsApp media GET:', error)
     return NextResponse.json(
       { error: 'Failed to fetch media' },
