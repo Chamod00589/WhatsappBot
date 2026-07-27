@@ -11,6 +11,10 @@ import {
   toPickedLine,
 } from '@/lib/orders/catalog-helpers'
 import type { OrderLineItem } from '@/lib/orders/constants'
+import {
+  loadOrderPickerProducts,
+  peekOrderPickerProducts,
+} from '@/lib/orders/picker-catalog-cache'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -42,7 +46,9 @@ export function OrderProductPicker({
   addLabel,
 }: OrderProductPickerProps) {
   const t = useTranslations('Inbox.orders')
-  const [products, setProducts] = useState<CatalogProduct[]>([])
+  const [products, setProducts] = useState<CatalogProduct[]>(
+    () => peekOrderPickerProducts() ?? [],
+  )
   const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<CatalogProduct | null>(null)
@@ -50,12 +56,19 @@ export function OrderProductPicker({
   const [qty, setQty] = useState(1)
 
   const load = useCallback(async () => {
+    const cached = peekOrderPickerProducts()
+    if (cached?.length) {
+      setProducts(cached)
+      setLoading(false)
+      // Refresh in background if still within TTL this is a no-op; otherwise updates cache.
+      void loadOrderPickerProducts().then(setProducts).catch(() => {})
+      return
+    }
+
     setLoading(true)
     try {
-      const res = await fetch('/api/orders/catalog')
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
-      setProducts(Array.isArray(data.products) ? data.products : [])
+      const list = await loadOrderPickerProducts()
+      setProducts(list)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('catalogLoadFailed'))
       setProducts([])

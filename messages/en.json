@@ -215,7 +215,7 @@
       "quotationTitle": "Create quotation",
       "quotationHint": "Add products only — no customer details. Preview below, then send as an image.",
       "customerMessage": "Customer message",
-      "customerMessagePlaceholder": "Paste the customer’s address message, or use “Use for order” on a chat bubble.",
+      "customerMessagePlaceholder": "Paste the customer’s address message, or use “Use for order” on a chat bubble. Opening Create order auto-fills from selected text or the latest address-like message.",
       "formatWithAI": "Format with AI",
       "orderText": "Order text (@@ format)",
       "products": "Products",

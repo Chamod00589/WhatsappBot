@@ -33,6 +33,7 @@ import {
   type OrderPaymentStatus,
 } from '@/lib/orders/constants'
 import { uploadAccountMedia } from '@/lib/storage/upload-media'
+import { prefetchOrderPickerCatalog } from '@/lib/orders/picker-catalog-cache'
 import { cn } from '@/lib/utils'
 
 const CHAT_MEDIA_BUCKET = 'chat-media'
@@ -76,6 +77,7 @@ export function CreateOrderDialog({
       setCaptureOrder(null)
       return
     }
+    prefetchOrderPickerCatalog()
     const seed = (seedText || '').trim()
     setSourceText(seed)
     setOrderText('')

@@ -24,6 +24,7 @@ import {
   type OrderLineItem,
 } from '@/lib/orders/constants'
 import { uploadAccountMedia } from '@/lib/storage/upload-media'
+import { prefetchOrderPickerCatalog } from '@/lib/orders/picker-catalog-cache'
 
 const CHAT_MEDIA_BUCKET = 'chat-media'
 
@@ -50,6 +51,7 @@ export function QuotationDialog({
     setItems([])
     setStatus('')
     setSending(false)
+    prefetchOrderPickerCatalog()
   }, [open])
 
   const itemsSubtotal = items.reduce(

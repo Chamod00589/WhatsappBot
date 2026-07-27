@@ -38,6 +38,7 @@ import { CreateOrderDialog } from "./create-order-dialog";
 import { QuotationDialog } from "./quotation-dialog";
 import { ContactTagChips } from "@/components/inbox/contact-tag-chips";
 import { ConversationThreadControls } from "@/components/inbox/conversation-thread-controls";
+import { resolveCreateOrderSeedText } from "@/lib/orders/detect-address-message";
 import { toast } from "sonner";
 
 interface ReplyDraft {
@@ -160,6 +161,19 @@ export function MessageThread({
   const [createOrderOpen, setCreateOrderOpen] = useState(false);
   const [quotationOpen, setQuotationOpen] = useState(false);
   const [orderSeedText, setOrderSeedText] = useState<string | null>(null);
+  /** Last highlighted chat text — survives mousedown that clears the live selection. */
+  const lastChatSelectionRef = useRef("");
+
+  useEffect(() => {
+    const onSelectionChange = () => {
+      const text = window.getSelection()?.toString()?.trim() ?? "";
+      if (text.length >= 8) {
+        lastChatSelectionRef.current = text;
+      }
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, []);
 
   // 24-hour session timer
   const sessionInfo = useMemo(() => {
@@ -1014,7 +1028,11 @@ export function MessageThread({
                           if (emoji) void postReaction(msg.id, emoji);
                         }}
                         onUseForOrder={(text) => {
-                          setOrderSeedText(text);
+                          const seed = resolveCreateOrderSeedText({
+                            explicitSeed: text,
+                            messages,
+                          });
+                          setOrderSeedText(seed || text);
                           setCreateOrderOpen(true);
                         }}
                       >
@@ -1061,7 +1079,15 @@ export function MessageThread({
         onSendProductQuickReply={handleSendProductQuickReply}
         onOpenTemplates={handleOpenTemplates}
         onOpenCreateOrder={() => {
-          setOrderSeedText(null);
+          const live =
+            typeof window !== "undefined"
+              ? window.getSelection()?.toString()?.trim() ?? ""
+              : "";
+          const seed = resolveCreateOrderSeedText({
+            messages,
+            browserSelection: live || lastChatSelectionRef.current,
+          });
+          setOrderSeedText(seed || null);
           setCreateOrderOpen(true);
         }}
         onOpenQuotation={() => setQuotationOpen(true)}

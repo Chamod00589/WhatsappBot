@@ -4,8 +4,7 @@ import { fetchOrderPickerProducts } from '@/lib/catalog/products'
 
 /**
  * GET /api/orders/catalog
- * Product list for Create Order / Quotation pickers.
- * Uses quick-reply image URLs (color index ↔ image index), enriched from /api/products.
+ * Fast product list for Create Order / Quotation pickers (cached server-side).
  */
 export async function GET() {
   try {
@@ -16,7 +15,15 @@ export async function GET() {
 
   try {
     const products = await fetchOrderPickerProducts()
-    return NextResponse.json({ success: true, products })
+    return NextResponse.json(
+      { success: true, products },
+      {
+        headers: {
+          // Browser / CDN can reuse briefly; server also keeps a 5 min memory cache.
+          'Cache-Control': 'private, max-age=60, stale-while-revalidate=240',
+        },
+      },
+    )
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Catalog fetch failed'
     return NextResponse.json({ error: msg }, { status: 502 })

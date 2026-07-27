@@ -82,9 +82,16 @@ function normalizeQuickMessage(raw: unknown): CatalogQuickMessage | null {
 
 export async function fetchCatalogQuickMessages(
   base = catalogBaseUrl(),
+  options?: { lite?: boolean },
 ): Promise<CatalogQuickMessage[]> {
-  const res = await fetch(`${base}/api/quick-messages`, {
-    cache: 'no-store',
+  const lite = options?.lite === true
+  const url = lite
+    ? `${base}/api/quick-messages?lite=1`
+    : `${base}/api/quick-messages`
+  const res = await fetch(url, {
+    // Lite catalog is cache-friendly; full import still needs fresh sync.
+    cache: lite ? 'default' : 'no-store',
+    next: lite ? { revalidate: 120 } : undefined,
     headers: { Accept: 'application/json' },
   })
   if (!res.ok) {
@@ -177,41 +184,31 @@ function parseColorsFromQuickMessageText(text: string): string[] {
     .filter(Boolean)
 }
 
-/**
- * Products for Create Order / Quotation pickers.
- * Prefer quick-message `imageUrls` (same order as colors, as in admin/TM),
- * and enrich price/colors/name from `/api/products` when `productId` matches.
- */
-export async function fetchOrderPickerProducts(
-  base = catalogBaseUrl(),
-): Promise<CatalogProduct[]> {
-  const [messages, products] = await Promise.all([
-    fetchCatalogQuickMessages(base),
-    fetchCatalogProducts(base).catch(() => [] as CatalogProduct[]),
-  ])
+const ORDER_PICKER_CACHE_TTL_MS = 5 * 60 * 1000
 
-  const byProductId = new Map(products.map((p) => [p.id, p]))
-  const fromQuickReplies: CatalogProduct[] = []
+type OrderPickerCacheEntry = {
+  expiresAt: number
+  products: CatalogProduct[]
+}
 
+const orderPickerCache = new Map<string, OrderPickerCacheEntry>()
+const orderPickerInflight = new Map<string, Promise<CatalogProduct[]>>()
+
+function buildPickerProductsFromQuickMessages(
+  messages: CatalogQuickMessage[],
+  base: string,
+): CatalogProduct[] {
+  const out: CatalogProduct[] = []
   for (const msg of messages) {
     if (!msg.productId) continue
-    const product = byProductId.get(msg.productId)
-    const images = (msg.imageUrls.length ? msg.imageUrls : product?.images || [])
+    const images = msg.imageUrls
       .map((u) => resolveCatalogImageUrl(u, base))
       .filter(Boolean)
-
-    const colors =
-      product?.colors?.length
-        ? product.colors
-        : parseColorsFromQuickMessageText(msg.text)
-    const price =
-      product && product.price > 0
-        ? product.price
-        : parsePriceFromQuickMessageText(msg.text)
-    const name = (product?.name || msg.title).trim()
+    const colors = parseColorsFromQuickMessageText(msg.text)
+    const price = parsePriceFromQuickMessageText(msg.text)
+    const name = msg.title.trim()
     if (!name) continue
-
-    fromQuickReplies.push({
+    out.push({
       id: msg.productId,
       name,
       price,
@@ -220,12 +217,64 @@ export async function fetchOrderPickerProducts(
       description: msg.description || undefined,
     })
   }
+  return out
+}
 
-  if (fromQuickReplies.length) return fromQuickReplies
+/**
+ * Products for Create Order / Quotation pickers.
+ * Fast path: lite quick-messages only (images + caption price/colors), cached 5 min.
+ * Falls back to /api/products only when no product quick replies exist.
+ */
+export async function fetchOrderPickerProducts(
+  base = catalogBaseUrl(),
+): Promise<CatalogProduct[]> {
+  const cacheKey = base
+  const hit = orderPickerCache.get(cacheKey)
+  if (hit && hit.expiresAt > Date.now()) {
+    return hit.products
+  }
 
-  // Fallback when no product quick replies exist yet.
-  return products.map((p) => ({
-    ...p,
-    images: p.images.map((u) => resolveCatalogImageUrl(u, base)).filter(Boolean),
-  }))
+  const existing = orderPickerInflight.get(cacheKey)
+  if (existing) return existing
+
+  const promise = (async () => {
+    // Prefer lite endpoint (skips sync/backfill). Fall back to full if older site.
+    let messages: CatalogQuickMessage[]
+    try {
+      messages = await fetchCatalogQuickMessages(base, { lite: true })
+    } catch {
+      messages = await fetchCatalogQuickMessages(base)
+    }
+
+    let products = buildPickerProductsFromQuickMessages(messages, base)
+
+    if (!products.length) {
+      const catalogProducts = await fetchCatalogProducts(base).catch(
+        () => [] as CatalogProduct[],
+      )
+      products = catalogProducts.map((p) => ({
+        ...p,
+        images: p.images
+          .map((u) => resolveCatalogImageUrl(u, base))
+          .filter(Boolean),
+      }))
+    }
+
+    orderPickerCache.set(cacheKey, {
+      expiresAt: Date.now() + ORDER_PICKER_CACHE_TTL_MS,
+      products,
+    })
+    return products
+  })().finally(() => {
+    orderPickerInflight.delete(cacheKey)
+  })
+
+  orderPickerInflight.set(cacheKey, promise)
+  return promise
+}
+
+/** Drop server memory cache (e.g. after admin catalog changes). */
+export function invalidateOrderPickerCatalogCache(base = catalogBaseUrl()): void {
+  orderPickerCache.delete(base)
+  orderPickerInflight.delete(base)
 }
