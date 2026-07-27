@@ -13,6 +13,12 @@ import { useRealtime } from "@/hooks/use-realtime";
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { toast } from "sonner";
 import { WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -69,6 +75,7 @@ function InboxPageInner() {
    * below reconciles to the stored value right after mount instead.
    */
   const [contactPanelOpen, setContactPanelOpen] = useState(true);
+  const [mobileContactOpen, setMobileContactOpen] = useState(false);
   useEffect(() => {
     try {
       const stored = localStorage.getItem(CONTACT_PANEL_STORAGE_KEY);
@@ -88,6 +95,10 @@ function InboxPageInner() {
       }
       return next;
     });
+  }, []);
+
+  const handleOpenMobileContact = useCallback(() => {
+    setMobileContactOpen(true);
   }, []);
 
   // Fire the deep-link auto-select exactly once per URL — subsequent
@@ -623,18 +634,26 @@ function InboxPageInner() {
             onRefresh={handleManualRefresh}
             contactPanelOpen={contactPanelOpen}
             onToggleContactPanel={handleToggleContactPanel}
+            onOpenMobileContact={handleOpenMobileContact}
           />
         </div>
 
-        {/* Right panel: Contact sidebar — desktop only, and only when the
-            agent hasn't collapsed it via the thread-header toggle (#258).
-            On mobile it's always hidden (the `lg:block` below), so the
-            toggle — which is itself desktop-only — never affects it. */}
+        {/* Right panel: Contact sidebar — desktop only when expanded. */}
         {contactPanelOpen && (
           <div className="hidden lg:block">
             <ContactSidebar contact={activeContact} />
           </div>
         )}
+
+        {/* Mobile contact sheet — opened from the thread header User button. */}
+        <Sheet open={mobileContactOpen} onOpenChange={setMobileContactOpen}>
+          <SheetContent side="right" className="w-full p-0 sm:max-w-sm lg:hidden">
+            <SheetHeader className="sr-only">
+              <SheetTitle>Contact</SheetTitle>
+            </SheetHeader>
+            <ContactSidebar contact={activeContact} className="border-l-0" />
+          </SheetContent>
+        </Sheet>
       </div>
     </div>
   );

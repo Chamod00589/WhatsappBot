@@ -27,6 +27,7 @@ import {
   RefreshCw,
   PanelRightOpen,
   PanelRightClose,
+  User,
 } from "lucide-react";
 import { format, isToday, isYesterday, differenceInHours } from "date-fns";
 import { useTranslations } from "next-intl";
@@ -111,6 +112,8 @@ interface MessageThreadProps {
    */
   contactPanelOpen?: boolean;
   onToggleContactPanel?: () => void;
+  /** Mobile: open the contact sheet (tags, notes, deals). */
+  onOpenMobileContact?: () => void;
 }
 
 function formatDateSeparator(dateStr: string, t: ReturnType<typeof useTranslations>): string {
@@ -169,6 +172,7 @@ export function MessageThread({
   onRefresh,
   contactPanelOpen,
   onToggleContactPanel,
+  onOpenMobileContact,
 }: MessageThreadProps) {
   const t = useTranslations("Inbox.messageThread");
   const tTimer = useTranslations("Inbox.sessionTimer");
@@ -982,11 +986,24 @@ export function MessageThread({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Mobile contact sheet — opens tags / notes / deals. */}
+          {onOpenMobileContact && (
+            <button
+              type="button"
+              onClick={onOpenMobileContact}
+              aria-label={t("showContact")}
+              title={t("showContact")}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground lg:hidden"
+            >
+              <User className="h-4 w-4" />
+            </button>
+          )}
+
           {/* Contact-panel toggle — desktop only. The contact sidebar
               eats a chunk of horizontal width that crowds the thread on
               smaller laptops; this lets agents reclaim it when they just
               want to read and reply. Hidden on mobile, where the sidebar
-              never renders as a permanent panel anyway. Issue #258. */}
+              opens as a sheet instead. Issue #258. */}
           {onToggleContactPanel && (
             <button
               type="button"

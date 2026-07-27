@@ -2,7 +2,15 @@
 
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Plus, Tag as TagIcon, X } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronUp,
+  Loader2,
+  Pencil,
+  Plus,
+  Tag as TagIcon,
+  X,
+} from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
@@ -38,9 +46,8 @@ const PRESET_COLORS = [
 ];
 
 /**
- * Tags card — colour-coded contact labels. Creation is an inline row
- * (name + colour swatch + Add); deletion goes through a confirmation
- * dialog since it detaches the tag from every contact.
+ * Tags card — colour-coded contact labels. Create, edit name/color,
+ * reorder, and delete (with confirmation).
  */
 export function TagManager() {
   const t = useTranslations('Settings.tagsAndFields');
@@ -51,8 +58,12 @@ export function TagManager() {
   const [tags, setTags] = useState<Tag[]>([]);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [tagToDelete, setTagToDelete] = useState<Tag | null>(null);
+  const [editTag, setEditTag] = useState<Tag | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editColor, setEditColor] = useState(PRESET_COLORS[3].value);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [reordering, setReordering] = useState(false);
   const [newTagName, setNewTagName] = useState('');
   const [selectedColor, setSelectedColor] = useState(PRESET_COLORS[3].value);
 
@@ -62,17 +73,17 @@ export function TagManager() {
       setLoading(false);
       return;
     }
-    fetchTags(user.id);
+    void fetchTags();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, user?.id]);
+  }, [authLoading, user?.id, accountId]);
 
-  async function fetchTags(userId: string) {
+  async function fetchTags() {
     try {
       setLoading(true);
-      const { data, error } = await supabase
-        .from('tags')
-        .select('*')
-        .eq('user_id', userId)
+      let query = supabase.from('tags').select('*');
+      if (accountId) query = query.eq('account_id', accountId);
+      const { data, error } = await query
+        .order('sort_order', { ascending: true })
         .order('created_at', { ascending: true });
 
       if (error) throw error;
@@ -98,13 +109,17 @@ export function TagManager() {
         return;
       }
 
-      // account_id is mandatory on every account-scoped insert (NOT
-      // NULL + RLS, no DB default).
+      const maxSort = tags.reduce(
+        (max, tag) => Math.max(max, Number(tag.sort_order) || 0),
+        0,
+      );
+
       const { error } = await supabase.from('tags').insert({
         user_id: user.id,
         account_id: accountId,
         name: newTagName.trim(),
         color: selectedColor,
+        sort_order: maxSort + 1,
       });
 
       if (error) throw error;
@@ -112,12 +127,72 @@ export function TagManager() {
       toast.success(t('tagCreated'));
       setNewTagName('');
       setSelectedColor(PRESET_COLORS[3].value);
-      await fetchTags(user.id);
+      await fetchTags();
     } catch (err) {
       console.error('Create error:', err);
       toast.error(t('failedToCreateTag'));
     } finally {
       setSaving(false);
+    }
+  }
+
+  function openEdit(tag: Tag) {
+    setEditTag(tag);
+    setEditName(tag.name);
+    setEditColor(tag.color || PRESET_COLORS[3].value);
+  }
+
+  async function handleSaveEdit() {
+    if (!editTag) return;
+    const name = editName.trim();
+    if (!name) {
+      toast.error(t('nameRequired'));
+      return;
+    }
+    try {
+      setSaving(true);
+      const { error } = await supabase
+        .from('tags')
+        .update({ name, color: editColor })
+        .eq('id', editTag.id);
+      if (error) throw error;
+      toast.success(t('tagUpdated'));
+      setEditTag(null);
+      await fetchTags();
+    } catch (err) {
+      console.error('Update error:', err);
+      toast.error(t('failedToUpdateTag'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function moveTag(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= tags.length) return;
+    const previous = tags;
+    const next = [...tags];
+    const [removed] = next.splice(index, 1);
+    next.splice(target, 0, removed);
+    setTags(next);
+    setReordering(true);
+    try {
+      const results = await Promise.all(
+        next.map((tag, i) =>
+          supabase
+            .from('tags')
+            .update({ sort_order: i + 1 })
+            .eq('id', tag.id),
+        ),
+      );
+      const failed = results.find((r) => r.error);
+      if (failed?.error) throw failed.error;
+    } catch (err) {
+      console.error('Reorder error:', err);
+      toast.error(t('failedToReorderTags'));
+      setTags(previous);
+    } finally {
+      setReordering(false);
     }
   }
 
@@ -139,7 +214,7 @@ export function TagManager() {
       if (error) throw error;
 
       toast.success(t('tagDeleted'));
-      setTags((prev) => prev.filter((t) => t.id !== tagToDelete.id));
+      setTags((prev) => prev.filter((row) => row.id !== tagToDelete.id));
       setDeleteDialogOpen(false);
       setTagToDelete(null);
     } catch (err) {
@@ -169,47 +244,79 @@ export function TagManager() {
         ) : (
           <>
             {tags.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {tags.map((tag) => (
-                  <span
+              <ul className="flex flex-col gap-2">
+                {tags.map((tag, index) => (
+                  <li
                     key={tag.id}
-                    className="group inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium transition-colors"
-                    style={{
-                      backgroundColor: `${tag.color}20`,
-                      color: tag.color,
-                      border: `1px solid ${tag.color}40`,
-                    }}
+                    className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-2 py-1.5"
                   >
+                    <div className="flex flex-col gap-0.5">
+                      <button
+                        type="button"
+                        aria-label={t('moveUp')}
+                        disabled={reordering || index === 0}
+                        onClick={() => void moveTag(index, -1)}
+                        className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
+                      >
+                        <ChevronUp className="size-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={t('moveDown')}
+                        disabled={reordering || index === tags.length - 1}
+                        onClick={() => void moveTag(index, 1)}
+                        className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
+                      >
+                        <ChevronDown className="size-3.5" />
+                      </button>
+                    </div>
                     <span
-                      className="size-2 rounded-full"
-                      style={{ backgroundColor: tag.color }}
-                    />
-                    {tag.name}
-                    <button
-                      type="button"
-                      onClick={() => confirmDelete(tag)}
-                      aria-label={t('deleteAria', { name: tag.name })}
-                      className="ml-0.5 rounded-full p-0.5 opacity-60 transition-opacity hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10"
+                      className="inline-flex min-w-0 flex-1 items-center gap-1.5 rounded-full px-3 py-1 text-sm font-medium"
+                      style={{
+                        backgroundColor: `${tag.color}20`,
+                        color: tag.color,
+                        border: `1px solid ${tag.color}40`,
+                      }}
                     >
-                      <X className="size-3" />
-                    </button>
-                  </span>
+                      <span
+                        className="size-2 shrink-0 rounded-full"
+                        style={{ backgroundColor: tag.color }}
+                      />
+                      <span className="truncate">{tag.name}</span>
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={t('editAria', { name: tag.name })}
+                      onClick={() => openEdit(tag)}
+                    >
+                      <Pencil className="size-3.5" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={t('deleteAria', { name: tag.name })}
+                      onClick={() => confirmDelete(tag)}
+                      className="text-muted-foreground hover:text-destructive"
+                    >
+                      <X className="size-3.5" />
+                    </Button>
+                  </li>
                 ))}
-              </div>
+              </ul>
             ) : (
-              <p className="text-sm text-muted-foreground">
-                {t('noTags')}
-              </p>
+              <p className="text-sm text-muted-foreground">{t('noTags')}</p>
             )}
 
-            {/* Inline create row */}
             <div className="flex flex-wrap items-center gap-2.5">
               <Input
                 placeholder={t('placeholder')}
                 value={newTagName}
                 onChange={(e) => setNewTagName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleCreate();
+                  if (e.key === 'Enter') void handleCreate();
                 }}
                 disabled={saving}
                 maxLength={40}
@@ -221,7 +328,9 @@ export function TagManager() {
                     key={color.value}
                     type="button"
                     onClick={() => setSelectedColor(color.value)}
-                    aria-label={t('useColor', { color: t(`colors.${color.name}` as Parameters<typeof t>[0]) })}
+                    aria-label={t('useColor', {
+                      color: t(`colors.${color.name}` as Parameters<typeof t>[0]),
+                    })}
                     aria-pressed={selectedColor === color.value}
                     className={cn(
                       'size-6 rounded-md transition-transform hover:scale-110',
@@ -236,7 +345,7 @@ export function TagManager() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleCreate}
+                onClick={() => void handleCreate()}
                 disabled={saving || !newTagName.trim()}
               >
                 {saving ? (
@@ -251,7 +360,47 @@ export function TagManager() {
         )}
       </CardContent>
 
-      {/* Delete confirmation */}
+      <Dialog open={!!editTag} onOpenChange={(o) => !o && setEditTag(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t('editTag')}</DialogTitle>
+            <DialogDescription>{t('editTagDesc')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              maxLength={40}
+              placeholder={t('placeholder')}
+            />
+            <div className="flex flex-wrap gap-1.5">
+              {PRESET_COLORS.map((color) => (
+                <button
+                  key={color.value}
+                  type="button"
+                  onClick={() => setEditColor(color.value)}
+                  aria-pressed={editColor === color.value}
+                  className={cn(
+                    'size-6 rounded-md transition-transform hover:scale-110',
+                    editColor === color.value &&
+                      'outline outline-2 outline-offset-2 outline-primary',
+                  )}
+                  style={{ backgroundColor: color.value }}
+                />
+              ))}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setEditTag(null)} disabled={saving}>
+              {t('cancel')}
+            </Button>
+            <Button onClick={() => void handleSaveEdit()} disabled={saving || !editName.trim()}>
+              {saving ? <Loader2 className="size-4 animate-spin" /> : t('saveTag')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
@@ -268,11 +417,7 @@ export function TagManager() {
             >
               {t('cancel')}
             </Button>
-            <Button
-              variant="destructive"
-              onClick={handleDelete}
-              disabled={deleting}
-            >
+            <Button variant="destructive" onClick={() => void handleDelete()} disabled={deleting}>
               {deleting ? (
                 <>
                   <Loader2 className="size-4 animate-spin" />

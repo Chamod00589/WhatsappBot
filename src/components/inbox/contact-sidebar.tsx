@@ -3,14 +3,14 @@
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { cn } from "@/lib/utils";
+import { addContactTag, deleteContactTag } from "@/lib/contacts/tag-api";
+import { toast } from "sonner";
 import type { Contact, Deal, ContactNote, Tag } from "@/types";
 import {
   Phone,
   Mail,
   Copy,
   Check,
-  User,
   Tag as TagIcon,
   DollarSign,
   StickyNote,
@@ -20,12 +20,15 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { format } from "date-fns";
 import { useTranslations } from "next-intl";
+import { cn } from "@/lib/utils";
 
 interface ContactSidebarProps {
   contact: Contact | null;
+  /** Optional className for the outer shell (mobile sheet vs desktop column). */
+  className?: string;
 }
 
-export function ContactSidebar({ contact }: ContactSidebarProps) {
+export function ContactSidebar({ contact, className }: ContactSidebarProps) {
   const tSidebar = useTranslations("Inbox.sidebar");
   const tThread = useTranslations("Inbox.messageThread");
 
@@ -33,7 +36,9 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
   const [copied, setCopied] = useState(false);
   const [deals, setDeals] = useState<Deal[]>([]);
   const [notes, setNotes] = useState<ContactNote[]>([]);
-  const [tags, setTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
+  const [assignedTags, setAssignedTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
+  const [allTags, setAllTags] = useState<Tag[]>([]);
+  const [savingTagId, setSavingTagId] = useState<string | null>(null);
   const [newNote, setNewNote] = useState("");
   const [addingNote, setAddingNote] = useState(false);
 
@@ -42,8 +47,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
 
     const supabase = createClient();
 
-    // Fetch deals, notes, and tags in parallel
-    const [dealsRes, notesRes, tagsRes] = await Promise.all([
+    const [dealsRes, notesRes, tagsRes, allTagsRes] = await Promise.all([
       supabase
         .from("deals")
         .select("*, stage:pipeline_stages(*)")
@@ -58,10 +62,25 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
         .from("contact_tags")
         .select("id, tag_id, tags(*)")
         .eq("contact_id", contact.id),
+      (() => {
+        let q = supabase
+          .from("tags")
+          .select("*")
+          .order("sort_order", { ascending: true })
+          .order("created_at", { ascending: true });
+        if (accountId) q = q.eq("account_id", accountId);
+        return q;
+      })(),
     ]);
 
     if (dealsRes.data) setDeals(dealsRes.data);
     if (notesRes.data) setNotes(notesRes.data);
+    if (allTagsRes.error) {
+      console.error("Failed to load tags:", allTagsRes.error);
+      setAllTags([]);
+    } else if (allTagsRes.data) {
+      setAllTags(allTagsRes.data);
+    }
     if (tagsRes.data) {
       const mapped = tagsRes.data
         .filter((ct: Record<string, unknown>) => ct.tags)
@@ -69,15 +88,15 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
           ...(ct.tags as Tag),
           contact_tag_id: ct.id as string,
         }));
-      setTags(mapped);
+      setAssignedTags(mapped);
+    } else {
+      setAssignedTags([]);
     }
-  }, [contact]);
+  }, [contact, accountId]);
 
-  // Load on contact change. setContactData/setTags run inside async
-  // Supabase callbacks, not synchronously in the effect body.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchContactData();
+    void fetchContactData();
   }, [fetchContactData]);
 
   const handleCopyPhone = useCallback(async () => {
@@ -85,10 +104,36 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
     await navigator.clipboard.writeText(contact.phone);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-    // Dep is the whole `contact` object (not `contact?.phone`) so the
-    // React Compiler's inference agrees with the manual dep list —
-    // fixes the `preserve-manual-memoization` lint error.
   }, [contact]);
+
+  const handleToggleTag = useCallback(
+    async (tag: Tag) => {
+      if (!contact) return;
+      const assigned = assignedTags.some((t) => t.id === tag.id);
+      setSavingTagId(tag.id);
+      try {
+        if (assigned) {
+          await deleteContactTag(contact.id, tag.id);
+          setAssignedTags((prev) => prev.filter((t) => t.id !== tag.id));
+        } else {
+          await addContactTag(contact.id, tag.id);
+          setAssignedTags((prev) => [
+            ...prev,
+            { ...tag, contact_tag_id: `temp-${tag.id}` },
+          ]);
+          // Refresh to get real contact_tag_id
+          await fetchContactData();
+        }
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : tSidebar("tagUpdateFailed"),
+        );
+      } finally {
+        setSavingTagId(null);
+      }
+    },
+    [contact, assignedTags, fetchContactData, tSidebar],
+  );
 
   const handleAddNote = useCallback(async () => {
     if (!contact || !newNote.trim()) return;
@@ -121,7 +166,12 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
 
   if (!contact) {
     return (
-      <div className="flex h-full w-70 items-center justify-center border-l border-border bg-card">
+      <div
+        className={cn(
+          "flex h-full w-full items-center justify-center border-l border-border bg-card lg:w-70",
+          className,
+        )}
+      >
         <p className="text-sm text-muted-foreground">{tThread("selectConversation")}</p>
       </div>
     );
@@ -129,15 +179,21 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
 
   const displayName = contact.name || contact.phone;
   const initials = displayName.charAt(0).toUpperCase();
+  const assignedIds = new Set(assignedTags.map((t) => t.id));
 
   return (
-    <div className="flex h-full w-70 flex-col border-l border-border bg-card">
+    <div
+      className={cn(
+        "flex h-full w-full flex-col border-l border-border bg-card lg:w-70",
+        className,
+      )}
+    >
       <ScrollArea className="flex-1">
         <div className="p-4">
-          {/* Contact Info */}
           <div className="flex flex-col items-center text-center">
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted text-lg font-semibold text-foreground">
               {contact.avatar_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={contact.avatar_url}
                   alt={displayName}
@@ -155,9 +211,9 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
             )}
           </div>
 
-          {/* Phone */}
           <div className="mt-4 space-y-2">
             <button
+              type="button"
               onClick={handleCopyPhone}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted"
             >
@@ -178,39 +234,59 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
             )}
           </div>
 
-          {/* Divider */}
           <div className="my-4 border-t border-border" />
 
-          {/* Tags */}
+          {/* Tags — click to assign / unassign */}
           <div>
             <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
               <TagIcon className="h-3 w-3" />
               {tSidebar("tags")}
             </div>
-            <div className="mt-2 flex flex-wrap gap-1">
-              {tags.length === 0 ? (
-                <p className="px-1 text-xs text-muted-foreground">{tSidebar("noTags")}</p>
+            <p className="mt-1 px-1 text-[10px] text-muted-foreground">
+              {tSidebar("tagsHint")}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {allTags.length === 0 ? (
+                <p className="px-1 text-xs text-muted-foreground">
+                  {tSidebar("noTagsDefined")}
+                </p>
               ) : (
-                tags.map((tag) => (
-                  <span
-                    key={tag.contact_tag_id}
-                    className="rounded-full px-2 py-0.5 text-[10px] font-medium"
-                    style={{
-                      backgroundColor: `${tag.color}20`,
-                      color: tag.color,
-                    }}
-                  >
-                    {tag.name}
-                  </span>
-                ))
+                allTags.map((tag) => {
+                  const selected = assignedIds.has(tag.id);
+                  const busy = savingTagId === tag.id;
+                  return (
+                    <button
+                      key={tag.id}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void handleToggleTag(tag)}
+                      title={
+                        selected
+                          ? tSidebar("unassignTag", { name: tag.name })
+                          : tSidebar("assignTag", { name: tag.name })
+                      }
+                      className={cn(
+                        "rounded-full px-2.5 py-1 text-[10px] font-medium transition-all",
+                        selected
+                          ? "ring-2 ring-primary ring-offset-1 ring-offset-card"
+                          : "opacity-45 hover:opacity-90",
+                        busy && "opacity-60",
+                      )}
+                      style={{
+                        backgroundColor: `${tag.color}20`,
+                        color: tag.color,
+                      }}
+                    >
+                      {tag.name}
+                    </button>
+                  );
+                })
               )}
             </div>
           </div>
 
-          {/* Divider */}
           <div className="my-4 border-t border-border" />
 
-          {/* Active Deals */}
           <div>
             <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
               <DollarSign className="h-3 w-3" />
@@ -221,13 +297,8 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
                 <p className="px-1 text-xs text-muted-foreground">{tSidebar("noDeals")}</p>
               ) : (
                 deals.map((deal) => (
-                  <div
-                    key={deal.id}
-                    className="rounded-lg bg-muted px-3 py-2"
-                  >
-                    <p className="text-sm font-medium text-foreground">
-                      {deal.title}
-                    </p>
+                  <div key={deal.id} className="rounded-lg bg-muted px-3 py-2">
+                    <p className="text-sm font-medium text-foreground">{deal.title}</p>
                     <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
                       <span>
                         {deal.currency ?? "$"}
@@ -251,10 +322,8 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
             </div>
           </div>
 
-          {/* Divider */}
           <div className="my-4 border-t border-border" />
 
-          {/* Notes */}
           <div>
             <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
               <StickyNote className="h-3 w-3" />
@@ -272,7 +341,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
                 <Button
                   size="sm"
                   className="h-auto bg-primary px-2 hover:bg-primary/90"
-                  onClick={handleAddNote}
+                  onClick={() => void handleAddNote()}
                   disabled={!newNote.trim() || addingNote}
                 >
                   <Plus className="h-3 w-3" />
@@ -281,10 +350,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
 
               <div className="mt-2 space-y-2">
                 {notes.map((note) => (
-                  <div
-                    key={note.id}
-                    className="rounded-lg bg-muted px-3 py-2"
-                  >
+                  <div key={note.id} className="rounded-lg bg-muted px-3 py-2">
                     <p className="whitespace-pre-wrap text-xs text-muted-foreground">
                       {note.note_text}
                     </p>
