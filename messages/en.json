@@ -254,6 +254,7 @@
       "extractDone": "Address formatted — edit if needed, then add products.",
       "extractEmpty": "AI returned an empty result.",
       "extractFailed": "Could not format address",
+      "aiNotConfigured": "No AI key saved. Add your provider API key in Agents → Setup.",
       "needOrderText": "Order text must include @@ fields.",
       "needProducts": "Add at least one product.",
       "needHalfAmount": "Enter the half-payment amount.",

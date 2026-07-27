@@ -107,7 +107,12 @@ export function CreateOrderDialog({
           body: JSON.stringify({ text: trimmed }),
         })
         const data = await res.json().catch(() => ({}))
-        if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
+        if (!res.ok) {
+          if (data?.code === 'ai_not_configured') {
+            throw new Error(t('aiNotConfigured'))
+          }
+          throw new Error(data?.error || `HTTP ${res.status}`)
+        }
         const reply = typeof data.reply === 'string' ? data.reply.trim() : ''
         if (!reply) throw new Error(t('extractEmpty'))
         setOrderText(reply)

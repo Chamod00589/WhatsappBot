@@ -113,13 +113,3 @@ export async function fetchOrderByPhone(options: {
     },
   })
 }
-
-export async function extractCustomerViaGemini(message: string): Promise<string> {
-  const json = (await ladiesbagsOrdersRequest('POST', '/api/gemini', {
-    body: { message },
-    auth: false,
-  })) as { reply?: string }
-  const reply = typeof json?.reply === 'string' ? json.reply.trim() : ''
-  if (!reply) throw new LadiesbagsOrdersError('Empty Gemini reply', 502, json)
-  return reply
-}

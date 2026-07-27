@@ -254,6 +254,7 @@
       "extractDone": "주소가 정리되었습니다 — 필요하면 수정한 뒤 제품을 추가하세요.",
       "extractEmpty": "AI가 빈 결과를 반환했습니다.",
       "extractFailed": "주소를 서식 지정하지 못했습니다",
+      "aiNotConfigured": "AI 키가 없습니다. Agents → Setup에서 API 키를 추가하세요.",
       "needOrderText": "주문 텍스트에 @@ 필드가 있어야 합니다.",
       "needProducts": "제품을 하나 이상 추가하세요.",
       "needHalfAmount": "부분 결제 금액을 입력하세요.",
