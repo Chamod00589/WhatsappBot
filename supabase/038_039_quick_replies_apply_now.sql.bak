@@ -1,0 +1,48 @@
+-- ============================================================
+-- Run this in Supabase Dashboard → SQL Editor for project
+-- kuewhykpbwqtzsqejlmw (WhatsappBot)
+--
+-- Fixes: Could not find the 'badge_color' column of 'quick_replies'
+-- ============================================================
+
+-- 038: product stubs
+ALTER TABLE quick_replies
+  DROP CONSTRAINT IF EXISTS quick_replies_kind_check;
+
+ALTER TABLE quick_replies
+  ADD CONSTRAINT quick_replies_kind_check
+  CHECK (kind IN ('text', 'interactive', 'product', 'catalog'));
+
+ALTER TABLE quick_replies
+  ADD COLUMN IF NOT EXISTS product_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quick_replies_account_product
+  ON quick_replies (account_id, product_id)
+  WHERE product_id IS NOT NULL AND kind = 'product';
+
+-- 039: catalog import + badge colors
+ALTER TABLE quick_replies
+  ADD COLUMN IF NOT EXISTS catalog_message_id TEXT;
+
+ALTER TABLE quick_replies
+  ADD COLUMN IF NOT EXISTS badge_color TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quick_replies_account_catalog
+  ON quick_replies (account_id, catalog_message_id)
+  WHERE catalog_message_id IS NOT NULL AND kind = 'catalog';
+
+UPDATE quick_replies
+SET
+  kind = 'catalog',
+  catalog_message_id = COALESCE(
+    catalog_message_id,
+    CASE
+      WHEN product_id IS NOT NULL AND product_id <> ''
+        THEN 'qm_site_prod_' || product_id
+      ELSE catalog_message_id
+    END
+  )
+WHERE kind = 'product' AND product_id IS NOT NULL;
+
+-- Refresh PostgREST schema cache (clears "schema cache" errors)
+NOTIFY pgrst, 'reload schema';

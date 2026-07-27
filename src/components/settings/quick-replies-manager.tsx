@@ -1,7 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, MessageSquare, Pencil, Plus, Trash2, Zap } from "lucide-react";
+import {
+  Download,
+  Loader2,
+  MessageSquare,
+  Package,
+  Pencil,
+  Plus,
+  Trash2,
+  Zap,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -31,6 +40,9 @@ interface DraftState {
   kind: QuickReplyKind;
   content_text: string;
   interactive_payload: InteractiveMessagePayload;
+  product_id?: string | null;
+  catalog_message_id?: string | null;
+  badge_color?: string | null;
 }
 
 function emptyDraft(): DraftState {
@@ -42,11 +54,26 @@ function emptyDraft(): DraftState {
   };
 }
 
+function previewFor(qr: QuickReply): string {
+  if (qr.kind === "product" || qr.kind === "catalog") {
+    const bits = [
+      qr.product_id ? "Product" : "Custom",
+      qr.catalog_message_id || qr.product_id || "catalog",
+    ]
+    return bits.join(" · ")
+  }
+  if (qr.kind === "interactive" && qr.interactive_payload) {
+    return interactivePayloadPreviewText(qr.interactive_payload);
+  }
+  return qr.content_text ?? "";
+}
+
 export function QuickRepliesManager() {
   const [items, setItems] = useState<QuickReply[]>([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState<DraftState | null>(null);
   const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -72,7 +99,40 @@ export function QuickRepliesManager() {
       content_text: qr.content_text ?? "",
       interactive_payload:
         qr.interactive_payload ?? blankButtonsPayload(),
+      product_id: qr.product_id,
+      catalog_message_id: qr.catalog_message_id,
+      badge_color: qr.badge_color,
     });
+
+  const importProducts = useCallback(async () => {
+    setImporting(true);
+    try {
+      const res = await fetch("/api/quick-replies/import-products?prune=1", {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(data.error ?? "Couldn't import products.");
+        return;
+      }
+      const parts = [
+        `${data.messages ?? data.products ?? 0} messages`,
+        `${data.created ?? 0} added`,
+        `${data.updated ?? 0} updated`,
+      ];
+      if (typeof data.custom === "number") parts.push(`${data.custom} custom`);
+      if (typeof data.jpegReady === "number") {
+        parts.push(`${data.jpegReady} JPEG-ready`);
+      }
+      if (data.pruned) parts.push(`${data.pruned} removed`);
+      toast.success(`Catalog synced — ${parts.join(", ")}.`);
+      await load();
+    } catch {
+      toast.error("Couldn't import products.");
+    } finally {
+      setImporting(false);
+    }
+  }, [load]);
 
   const save = useCallback(async () => {
     if (!draft) return;
@@ -80,6 +140,36 @@ export function QuickRepliesManager() {
       toast.error("Give the quick reply a name.");
       return;
     }
+
+    // Catalog stubs are admin-managed — only the display title is editable.
+    if (draft.kind === "product" || draft.kind === "catalog") {
+      if (!draft.id) {
+        toast.error("Import from ladiesbags.lk catalog instead of creating manually.");
+        return;
+      }
+      setSaving(true);
+      try {
+        const res = await fetch(`/api/quick-replies/${draft.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: draft.title }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          toast.error(data.error ?? "Couldn't save the quick reply.");
+          return;
+        }
+        toast.success("Quick reply updated.");
+        setDraft(null);
+        await load();
+      } catch {
+        toast.error("Couldn't save the quick reply.");
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
     const payload =
       draft.kind === "interactive"
         ? { title: draft.title, kind: "interactive", interactive_payload: draft.interactive_payload }
@@ -127,12 +217,26 @@ export function QuickRepliesManager() {
     <div>
       <SettingsPanelHead
         title="Quick replies"
-        description="Reusable snippets — plain text or a saved interactive message — that agents can insert from the inbox composer."
+        description="Reusable snippets — plain text, interactive, or catalog messages from ladiesbags.lk admin (products + custom, badge colors). Stubs only — images/text resolved live on send."
         action={
-          <Button onClick={openCreate}>
-            <Plus className="mr-1 h-4 w-4" />
-            New quick reply
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              onClick={importProducts}
+              disabled={importing}
+            >
+              {importing ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="mr-1 h-4 w-4" />
+              )}
+              Import / update all
+            </Button>
+            <Button onClick={openCreate}>
+              <Plus className="mr-1 h-4 w-4" />
+              New quick reply
+            </Button>
+          </div>
         }
       />
 
@@ -142,7 +246,7 @@ export function QuickRepliesManager() {
         </div>
       ) : items.length === 0 ? (
         <p className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
-          No quick replies yet. Create one to reuse it across conversations.
+          No quick replies yet. Import from ladiesbags.lk admin (products + custom) or create a text snippet.
         </p>
       ) : (
         <ul className="flex flex-col gap-2">
@@ -153,15 +257,23 @@ export function QuickRepliesManager() {
             >
               {qr.kind === "interactive" ? (
                 <Zap className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+              ) : qr.kind === "product" || qr.kind === "catalog" ? (
+                qr.badge_color ? (
+                  <span
+                    className="mt-1 h-4 w-4 shrink-0 rounded-full border border-border"
+                    style={{ backgroundColor: qr.badge_color }}
+                    title={qr.badge_color}
+                  />
+                ) : (
+                  <Package className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+                )
               ) : (
                 <MessageSquare className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
               )}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-foreground">{qr.title}</p>
                 <p className="truncate text-xs text-muted-foreground">
-                  {qr.kind === "interactive" && qr.interactive_payload
-                    ? interactivePayloadPreviewText(qr.interactive_payload)
-                    : qr.content_text}
+                  {previewFor(qr)}
                 </p>
               </div>
               <div className="flex shrink-0 gap-1">
@@ -198,30 +310,57 @@ export function QuickRepliesManager() {
                   className="bg-muted text-foreground"
                 />
               </div>
-              <div className="flex gap-2">
-                <KindTab
-                  active={draft.kind === "text"}
-                  label="Text"
-                  onClick={() => setDraft({ ...draft, kind: "text" })}
-                />
-                <KindTab
-                  active={draft.kind === "interactive"}
-                  label="Interactive"
-                  onClick={() => setDraft({ ...draft, kind: "interactive" })}
-                />
-              </div>
-              {draft.kind === "text" ? (
-                <Textarea
-                  value={draft.content_text}
-                  onChange={(e) => setDraft({ ...draft, content_text: e.target.value })}
-                  placeholder="The message text to insert"
-                  className="min-h-28 bg-muted text-foreground"
-                />
+              {draft.kind === "product" || draft.kind === "catalog" ? (
+                <div className="rounded-md border border-border bg-muted/40 p-3 text-sm text-muted-foreground">
+                  <p className="font-medium text-foreground">Catalog quick reply</p>
+                  <p className="mt-1">
+                    Only the name is stored here. Caption text and images load from
+                    ladiesbags.lk admin on send (prefer pre-converted JPEGs).
+                  </p>
+                  {draft.badge_color && (
+                    <p className="mt-2 flex items-center gap-2 text-xs">
+                      <span
+                        className="inline-block h-3 w-3 rounded-full border"
+                        style={{ backgroundColor: draft.badge_color }}
+                      />
+                      {draft.badge_color}
+                    </p>
+                  )}
+                  {draft.catalog_message_id && (
+                    <p className="mt-1 font-mono text-xs">id: {draft.catalog_message_id}</p>
+                  )}
+                  {draft.product_id && (
+                    <p className="mt-1 font-mono text-xs">product_id: {draft.product_id}</p>
+                  )}
+                </div>
               ) : (
-                <InteractiveBuilder
-                  value={draft.interactive_payload}
-                  onChange={(p) => setDraft({ ...draft, interactive_payload: p })}
-                />
+                <>
+                  <div className="flex gap-2">
+                    <KindTab
+                      active={draft.kind === "text"}
+                      label="Text"
+                      onClick={() => setDraft({ ...draft, kind: "text" })}
+                    />
+                    <KindTab
+                      active={draft.kind === "interactive"}
+                      label="Interactive"
+                      onClick={() => setDraft({ ...draft, kind: "interactive" })}
+                    />
+                  </div>
+                  {draft.kind === "text" ? (
+                    <Textarea
+                      value={draft.content_text}
+                      onChange={(e) => setDraft({ ...draft, content_text: e.target.value })}
+                      placeholder="The message text to insert"
+                      className="min-h-28 bg-muted text-foreground"
+                    />
+                  ) : (
+                    <InteractiveBuilder
+                      value={draft.interactive_payload}
+                      onChange={(p) => setDraft({ ...draft, interactive_payload: p })}
+                    />
+                  )}
+                </>
               )}
             </div>
           )}

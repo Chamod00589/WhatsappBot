@@ -49,13 +49,15 @@ import {
 import { deleteAccountMedia } from "@/lib/storage/upload-media";
 import { TemplatePicker } from "./template-picker";
 import { AiThreadBanner } from "./ai-thread-banner";
-import { buildReplyPreview } from "./reply-quote";
+import { buildReplyQuoteFields } from "./reply-quote";
 import { toast } from "sonner";
 
 interface ReplyDraft {
   id: string;
   authorLabel: string;
   preview: string;
+  mediaUrl?: string | null;
+  mediaType?: Message["content_type"] | null;
 }
 
 function renderTemplateBody(body: string, params: string[]): string {
@@ -552,7 +554,9 @@ export function MessageThread({
           onUpdateMessage(tempId, { status: "failed" });
           // The upload never reached the recipient — GC the orphaned
           // object rather than leaving it in the public bucket forever.
-          void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
+          if (payload.path) {
+            void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
+          }
           return;
         }
 
@@ -562,7 +566,9 @@ export function MessageThread({
         const reason = err instanceof Error ? err.message : "network error";
         toast.error(`Failed to send: ${reason}`);
         onUpdateMessage(tempId, { status: "failed" });
-        void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
+        if (payload.path) {
+          void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
+        }
       }
     },
     [conversation, onNewMessage, onUpdateMessage],
@@ -619,6 +625,63 @@ export function MessageThread({
       }
     },
     [conversation, onNewMessage, onUpdateMessage],
+  );
+
+  const handleSendProductQuickReply = useCallback(
+    async (quickReplyId: string) => {
+      if (!conversation) return;
+
+      const toastId = toast.loading("Sending product details…");
+      try {
+        const res = await fetch("/api/whatsapp/send-product-quick-reply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conversation_id: conversation.id,
+            quick_reply_id: quickReplyId,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok && res.status !== 207) {
+          const reason = data?.error || `HTTP ${res.status}`;
+          toast.error(`Failed to send product: ${reason}`, { id: toastId });
+          return;
+        }
+
+        const sent = typeof data.images_sent === "number" ? data.images_sent : data.sent ?? 0;
+        const attempted =
+          typeof data.images_attempted === "number" ? data.images_attempted : sent;
+        const shortTitle =
+          typeof data.short_title === "string" ? data.short_title : "Product details";
+        const failCount = Array.isArray(data.failures) ? data.failures.length : 0;
+
+        if (failCount > 0 && sent > 0) {
+          toast.warning(
+            `${shortTitle}: sent ${sent}/${attempted} photos (some failed).`,
+            { id: toastId },
+          );
+        } else if (sent > 0) {
+          toast.success(
+            `${shortTitle}: sent ${sent} photo${sent === 1 ? "" : "s"}.`,
+            { id: toastId },
+          );
+        } else if (data.text_sent) {
+          toast.success(`${shortTitle}: sent as text (images unavailable).`, {
+            id: toastId,
+          });
+        } else {
+          toast.error(`Failed to send product: ${data.error || "unknown error"}`, {
+            id: toastId,
+          });
+        }
+        // Chat shows only the short title stub — refresh to pick it up.
+        onRefresh?.();
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "network error";
+        toast.error(`Failed to send product: ${reason}`, { id: toastId });
+      }
+    },
+    [conversation, onRefresh],
   );
 
   const handleStatusChange = useCallback(
@@ -744,13 +807,16 @@ export function MessageThread({
 
   const handleStartReply = useCallback(
     (msg: Message) => {
+      const fields = buildReplyQuoteFields(msg, tQuote);
       setReplyTo({
         id: msg.id,
         authorLabel: authorLabelFor(msg),
-        preview: buildReplyPreview(msg, tQuote),
+        preview: fields.preview,
+        mediaUrl: fields.mediaUrl,
+        mediaType: fields.mediaType,
       });
     },
-    [authorLabelFor],
+    [authorLabelFor, tQuote],
   );
 
   // Single reaction-set primitive. emoji === "" removes; otherwise adds/swaps.
@@ -1092,7 +1158,7 @@ export function MessageThread({
                             parent.sender_type === "agent" || parent.sender_type === "bot"
                               ? t("me") 
                               : contact?.name || contact?.phone || "Unknown",
-                          preview: buildReplyPreview(parent, tQuote),
+                          ...buildReplyQuoteFields(parent, tQuote),
                         }
                       : null;
                     const msgReactions = reactionsByMessageId.get(msg.id);
@@ -1156,6 +1222,7 @@ export function MessageThread({
         onSend={handleSend}
         onSendMedia={handleSendMedia}
         onSendInteractive={handleSendInteractive}
+        onSendProductQuickReply={handleSendProductQuickReply}
         onOpenTemplates={handleOpenTemplates}
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}

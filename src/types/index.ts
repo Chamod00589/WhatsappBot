@@ -629,7 +629,7 @@ export interface AutomationLog {
 // Quick replies — reusable snippets (migration 035)
 // ============================================================
 
-export type QuickReplyKind = 'text' | 'interactive';
+export type QuickReplyKind = 'text' | 'interactive' | 'product' | 'catalog';
 
 export interface QuickReply {
   id: string;
@@ -643,6 +643,19 @@ export interface QuickReply {
   content_text?: string | null;
   /** Set when `kind === 'interactive'`. */
   interactive_payload?: InteractiveMessagePayload | null;
+  /**
+   * External ladiesbags.lk product id when imported from a product quick message.
+   */
+  product_id?: string | null;
+  /**
+   * External whatsapp_quick_messages.id from ladiesbags admin
+   * (`qm_site_prod_…` / `qm_site_custom_…`) when `kind === 'catalog'`.
+   */
+  catalog_message_id?: string | null;
+  /** Badge color from admin quick messages (hex). */
+  badge_color?: string | null;
+  /** Mirrors ladiesbags.lk /admin/quick-messages sort_order. */
+  sort_order?: number | null;
   created_at: string;
   updated_at: string;
 }

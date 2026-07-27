@@ -73,8 +73,8 @@ export interface SendMediaPayload {
   kind: ComposerMediaKind;
   /** Public chat-media URL Meta fetches at send time. */
   mediaUrl: string;
-  /** Storage object path — lets the caller GC the object if the send fails. */
-  path: string;
+  /** Storage object path — lets the caller GC the object if the send fails. Optional for external URLs. */
+  path?: string;
   /** Optional caption (image/video/document only). */
   caption?: string;
   /** Original file name — surfaced to the recipient for documents. */
@@ -87,6 +87,8 @@ interface ReplyDraft {
   id: string;
   authorLabel: string;
   preview: string;
+  mediaUrl?: string | null;
+  mediaType?: import("@/types").Message["content_type"] | null;
 }
 
 // Mirrors the chat-media bucket's allowed_mime_types (migration 023) for
@@ -115,6 +117,8 @@ interface MessageComposerProps {
   onSend: (text: string, replyToId?: string) => void;
   onSendMedia: (payload: SendMediaPayload) => void;
   onSendInteractive: (payload: InteractiveMessagePayload, replyToId?: string) => void;
+  /** Send a product catalog quick-reply (images via public URL + caption). */
+  onSendProductQuickReply: (quickReplyId: string) => void | Promise<void>;
   onOpenTemplates: () => void;
   replyTo?: ReplyDraft | null;
   onClearReply?: () => void;
@@ -137,6 +141,7 @@ export function MessageComposer({
   onSend,
   onSendMedia,
   onSendInteractive,
+  onSendProductQuickReply,
   onOpenTemplates,
   replyTo,
   onClearReply,
@@ -355,10 +360,15 @@ export function MessageComposer({
   }, [interactivePayload, t]);
 
   // A picked quick reply: text fills the composer; interactive opens the
-  // builder pre-filled so the agent can tweak before sending.
+  // builder pre-filled so the agent can tweak before sending; product
+  // stubs send live catalog images + caption (no textarea insert).
   const handlePickQuickReply = useCallback(
     (qr: QuickReply) => {
       setQuickReplyOpen(false);
+      if (qr.kind === "product" || qr.kind === "catalog") {
+        void onSendProductQuickReply(qr.id);
+        return;
+      }
       if (qr.kind === "interactive" && qr.interactive_payload) {
         openInteractiveBuilder(qr.interactive_payload);
         return;
@@ -378,7 +388,7 @@ export function MessageComposer({
         }
       });
     },
-    [openInteractiveBuilder, adjustHeight],
+    [openInteractiveBuilder, adjustHeight, onSendProductQuickReply],
   );
 
   // Upload a captured file to chat-media and stage it as a draft.
@@ -542,6 +552,8 @@ export function MessageComposer({
           <ReplyQuote
             authorLabel={replyTo.authorLabel}
             preview={replyTo.preview}
+            mediaUrl={replyTo.mediaUrl}
+            mediaType={replyTo.mediaType}
             onDismiss={onClearReply}
           />
         </div>

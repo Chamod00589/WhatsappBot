@@ -15,6 +15,8 @@ export async function GET() {
     const { data, error } = await supabase
       .from('quick_replies')
       .select('*')
+      // Catalog imports use admin sort_order; manual snippets fall back by created_at.
+      .order('sort_order', { ascending: true })
       .order('created_at', { ascending: false })
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     return NextResponse.json({ quick_replies: data ?? [] })

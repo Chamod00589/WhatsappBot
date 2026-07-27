@@ -24,7 +24,12 @@ import { useTranslations } from "next-intl";
 interface MessageBubbleProps {
   message: Message;
   /** Pre-computed quote info for messages that reply to another. */
-  reply?: { authorLabel: string; preview: string } | null;
+  reply?: {
+    authorLabel: string;
+    preview: string;
+    mediaUrl?: string | null;
+    mediaType?: Message["content_type"] | null;
+  } | null;
   reactions?: MessageReaction[];
   currentUserId?: string;
   onToggleReaction?: (emoji: string) => void;
@@ -291,6 +296,8 @@ export function MessageBubble({
           <ReplyQuote
             authorLabel={reply.authorLabel}
             preview={reply.preview}
+            mediaUrl={reply.mediaUrl}
+            mediaType={reply.mediaType}
             onPrimary={isAgent}
           />
         )}
