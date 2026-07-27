@@ -21,6 +21,8 @@ import {
   Sparkles,
   MessageSquareDashed,
   Zap,
+  ReceiptText,
+  ClipboardList,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { GatedButton } from "@/components/ui/gated-button";
@@ -120,6 +122,8 @@ interface MessageComposerProps {
   /** Send a product catalog quick-reply (images via public URL + caption). */
   onSendProductQuickReply: (quickReplyId: string) => void | Promise<void>;
   onOpenTemplates: () => void;
+  onOpenCreateOrder?: () => void;
+  onOpenQuotation?: () => void;
   replyTo?: ReplyDraft | null;
   onClearReply?: () => void;
 }
@@ -143,6 +147,8 @@ export function MessageComposer({
   onSendInteractive,
   onSendProductQuickReply,
   onOpenTemplates,
+  onOpenCreateOrder,
+  onOpenQuotation,
   replyTo,
   onClearReply,
 }: MessageComposerProps) {
@@ -725,6 +731,36 @@ export function MessageComposer({
           >
             <Zap className="h-4 w-4" />
           </GatedButton>
+
+          {onOpenCreateOrder ? (
+            <GatedButton
+              variant="ghost"
+              size="sm"
+              canAct={!readOnly}
+              gateReason="send messages"
+              disabled={inputsDisabled}
+              title={readOnly ? undefined : t("createOrder")}
+              className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+              onClick={onOpenCreateOrder}
+            >
+              <ReceiptText className="h-4 w-4" />
+            </GatedButton>
+          ) : null}
+
+          {onOpenQuotation ? (
+            <GatedButton
+              variant="ghost"
+              size="sm"
+              canAct={!readOnly}
+              gateReason="send messages"
+              disabled={inputsDisabled}
+              title={readOnly ? undefined : t("quotation")}
+              className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+              onClick={onOpenQuotation}
+            >
+              <ClipboardList className="h-4 w-4" />
+            </GatedButton>
+          ) : null}
 
           <textarea
             ref={textareaRef}

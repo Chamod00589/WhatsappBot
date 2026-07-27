@@ -39,6 +39,7 @@ interface DraftState {
   title: string;
   kind: QuickReplyKind;
   content_text: string;
+  description: string;
   interactive_payload: InteractiveMessagePayload;
   product_id?: string | null;
   catalog_message_id?: string | null;
@@ -50,17 +51,19 @@ function emptyDraft(): DraftState {
     title: "",
     kind: "text",
     content_text: "",
+    description: "",
     interactive_payload: blankButtonsPayload(),
   };
 }
 
 function previewFor(qr: QuickReply): string {
+  if (qr.description?.trim()) return qr.description.trim();
   if (qr.kind === "product" || qr.kind === "catalog") {
     const bits = [
       qr.product_id ? "Product" : "Custom",
       qr.catalog_message_id || qr.product_id || "catalog",
-    ]
-    return bits.join(" · ")
+    ];
+    return bits.join(" · ");
   }
   if (qr.kind === "interactive" && qr.interactive_payload) {
     return interactivePayloadPreviewText(qr.interactive_payload);
@@ -97,6 +100,7 @@ export function QuickRepliesManager() {
       title: qr.title,
       kind: qr.kind,
       content_text: qr.content_text ?? "",
+      description: qr.description ?? "",
       interactive_payload:
         qr.interactive_payload ?? blankButtonsPayload(),
       product_id: qr.product_id,
@@ -272,7 +276,7 @@ export function QuickRepliesManager() {
               )}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-foreground">{qr.title}</p>
-                <p className="truncate text-xs text-muted-foreground">
+                <p className="line-clamp-2 text-xs text-muted-foreground">
                   {previewFor(qr)}
                 </p>
               </div>
@@ -314,9 +318,19 @@ export function QuickRepliesManager() {
                 <div className="rounded-md border border-border bg-muted/40 p-3 text-sm text-muted-foreground">
                   <p className="font-medium text-foreground">Catalog quick reply</p>
                   <p className="mt-1">
-                    Only the name is stored here. Caption text and images load from
-                    ladiesbags.lk admin on send (prefer pre-converted JPEGs).
+                    Only the name and description are stored here. Caption text and images
+                    load from ladiesbags.lk admin on send (prefer pre-converted JPEGs).
                   </p>
+                  {draft.description ? (
+                    <p className="mt-2 text-xs text-foreground whitespace-pre-wrap">
+                      {draft.description}
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-xs italic">
+                      No description imported yet — re-run Import / update all after adding
+                      descriptions in ladiesbags admin.
+                    </p>
+                  )}
                   {draft.badge_color && (
                     <p className="mt-2 flex items-center gap-2 text-xs">
                       <span

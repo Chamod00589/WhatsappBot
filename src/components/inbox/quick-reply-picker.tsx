@@ -95,14 +95,16 @@ export function QuickReplyPicker({
                         <span className="block truncate text-sm font-medium text-foreground">
                           {qr.title}
                         </span>
-                        <span className="block truncate text-xs text-muted-foreground">
-                          {isCatalog
-                            ? qr.product_id
-                              ? "Product details + photos"
-                              : "Custom quick message"
-                            : qr.kind === "interactive" && qr.interactive_payload
-                              ? interactivePayloadPreviewText(qr.interactive_payload)
-                              : qr.content_text}
+                        <span className="block line-clamp-2 text-xs text-muted-foreground">
+                          {qr.description?.trim()
+                            ? qr.description.trim()
+                            : isCatalog
+                              ? qr.product_id
+                                ? "Product details + photos"
+                                : "Custom quick message"
+                              : qr.kind === "interactive" && qr.interactive_payload
+                                ? interactivePayloadPreviewText(qr.interactive_payload)
+                                : qr.content_text}
                         </span>
                       </span>
                     </button>

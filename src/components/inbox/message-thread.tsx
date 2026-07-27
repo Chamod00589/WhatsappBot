@@ -34,6 +34,8 @@ import { deleteAccountMedia } from "@/lib/storage/upload-media";
 import { TemplatePicker } from "./template-picker";
 import { AiThreadBanner } from "./ai-thread-banner";
 import { buildReplyQuoteFields } from "./reply-quote";
+import { CreateOrderDialog } from "./create-order-dialog";
+import { QuotationDialog } from "./quotation-dialog";
 import { ContactTagChips } from "@/components/inbox/contact-tag-chips";
 import { ConversationThreadControls } from "@/components/inbox/conversation-thread-controls";
 import { toast } from "sonner";
@@ -155,6 +157,9 @@ export function MessageThread({
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
   const [replyTo, setReplyTo] = useState<ReplyDraft | null>(null);
   const [tagsRefreshKey, setTagsRefreshKey] = useState(0);
+  const [createOrderOpen, setCreateOrderOpen] = useState(false);
+  const [quotationOpen, setQuotationOpen] = useState(false);
+  const [orderSeedText, setOrderSeedText] = useState<string | null>(null);
 
   // 24-hour session timer
   const sessionInfo = useMemo(() => {
@@ -1008,6 +1013,10 @@ export function MessageThread({
                         onReact={(emoji) => {
                           if (emoji) void postReaction(msg.id, emoji);
                         }}
+                        onUseForOrder={(text) => {
+                          setOrderSeedText(text);
+                          setCreateOrderOpen(true);
+                        }}
                       >
                         <MessageBubble
                           message={msg}
@@ -1051,6 +1060,11 @@ export function MessageThread({
         onSendInteractive={handleSendInteractive}
         onSendProductQuickReply={handleSendProductQuickReply}
         onOpenTemplates={handleOpenTemplates}
+        onOpenCreateOrder={() => {
+          setOrderSeedText(null);
+          setCreateOrderOpen(true);
+        }}
+        onOpenQuotation={() => setQuotationOpen(true)}
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}
       />
@@ -1059,6 +1073,23 @@ export function MessageThread({
         open={templateModalOpen}
         onOpenChange={setTemplateModalOpen}
         onSelect={handleSendTemplate}
+      />
+
+      <CreateOrderDialog
+        open={createOrderOpen}
+        onOpenChange={(open) => {
+          setCreateOrderOpen(open);
+          if (!open) setOrderSeedText(null);
+        }}
+        seedText={orderSeedText}
+        contactPhone={contact.phone}
+        onSendMedia={handleSendMedia}
+      />
+
+      <QuotationDialog
+        open={quotationOpen}
+        onOpenChange={setQuotationOpen}
+        onSendMedia={handleSendMedia}
       />
     </div>
   );

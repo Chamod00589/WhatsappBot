@@ -9,6 +9,8 @@ export interface CatalogQuickMessage {
   id: string
   title: string
   text: string
+  /** Agent-facing blurb — what this quick message includes. */
+  description: string
   imageUrls: string[]
   jpegReady: boolean
   productId: string | null
@@ -54,6 +56,7 @@ function normalizeQuickMessage(raw: unknown): CatalogQuickMessage | null {
   const title = typeof m.title === 'string' ? m.title : ''
   if (!id || !title) return null
   const text = typeof m.text === 'string' ? m.text : ''
+  const description = typeof m.description === 'string' ? m.description.trim() : ''
   const imageUrls = Array.isArray(m.imageUrls)
     ? m.imageUrls.filter((u): u is string => typeof u === 'string' && !!u.trim())
     : []
@@ -64,7 +67,17 @@ function normalizeQuickMessage(raw: unknown): CatalogQuickMessage | null {
   const productId = typeof m.productId === 'string' ? m.productId : null
   const sortOrder = Number(m.sortOrder) || 0
   const jpegReady = m.jpegReady === true
-  return { id, title, text, imageUrls, jpegReady, productId, sortOrder, badgeColor }
+  return {
+    id,
+    title,
+    text,
+    description,
+    imageUrls,
+    jpegReady,
+    productId,
+    sortOrder,
+    badgeColor,
+  }
 }
 
 export async function fetchCatalogQuickMessages(
@@ -148,4 +161,71 @@ export async function fetchCatalogProduct(
 ): Promise<CatalogProduct | null> {
   const products = await fetchCatalogProducts(base)
   return products.find((p) => p.id === productId) ?? null
+}
+
+function parsePriceFromQuickMessageText(text: string): number {
+  const priceMatch = /බෑග් එකට\s*([\d,]+)/.exec(text || '')
+  return priceMatch ? Number(priceMatch[1].replace(/,/g, '')) || 0 : 0
+}
+
+function parseColorsFromQuickMessageText(text: string): string[] {
+  const colorsMatch = /Available colors\s*:\s*(.+)/i.exec(text || '')
+  if (!colorsMatch) return []
+  return colorsMatch[1]
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean)
+}
+
+/**
+ * Products for Create Order / Quotation pickers.
+ * Prefer quick-message `imageUrls` (same order as colors, as in admin/TM),
+ * and enrich price/colors/name from `/api/products` when `productId` matches.
+ */
+export async function fetchOrderPickerProducts(
+  base = catalogBaseUrl(),
+): Promise<CatalogProduct[]> {
+  const [messages, products] = await Promise.all([
+    fetchCatalogQuickMessages(base),
+    fetchCatalogProducts(base).catch(() => [] as CatalogProduct[]),
+  ])
+
+  const byProductId = new Map(products.map((p) => [p.id, p]))
+  const fromQuickReplies: CatalogProduct[] = []
+
+  for (const msg of messages) {
+    if (!msg.productId) continue
+    const product = byProductId.get(msg.productId)
+    const images = (msg.imageUrls.length ? msg.imageUrls : product?.images || [])
+      .map((u) => resolveCatalogImageUrl(u, base))
+      .filter(Boolean)
+
+    const colors =
+      product?.colors?.length
+        ? product.colors
+        : parseColorsFromQuickMessageText(msg.text)
+    const price =
+      product && product.price > 0
+        ? product.price
+        : parsePriceFromQuickMessageText(msg.text)
+    const name = (product?.name || msg.title).trim()
+    if (!name) continue
+
+    fromQuickReplies.push({
+      id: msg.productId,
+      name,
+      price,
+      colors,
+      images,
+      description: msg.description || undefined,
+    })
+  }
+
+  if (fromQuickReplies.length) return fromQuickReplies
+
+  // Fallback when no product quick replies exist yet.
+  return products.map((p) => ({
+    ...p,
+    images: p.images.map((u) => resolveCatalogImageUrl(u, base)).filter(Boolean),
+  }))
 }

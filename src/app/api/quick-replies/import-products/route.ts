@@ -39,12 +39,13 @@ export async function POST(request: Request) {
     const msg = messages[i]
     const title = stubTitleForCatalogMessage(msg)
     const badge_color = msg.badgeColor || '#00a884'
+    const description = msg.description?.trim() || null
     // Prefer admin sort_order; fall back to list index (1-based).
     const sort_order = msg.sortOrder > 0 ? msg.sortOrder : i + 1
 
     const { data: byCatalog } = await db
       .from('quick_replies')
-      .select('id, title, badge_color, kind, product_id, sort_order')
+      .select('id, title, badge_color, kind, product_id, sort_order, description')
       .eq('account_id', ctx.accountId)
       .eq('catalog_message_id', msg.id)
       .maybeSingle()
@@ -53,7 +54,7 @@ export async function POST(request: Request) {
     if (!row && msg.productId) {
       const { data: byProduct } = await db
         .from('quick_replies')
-        .select('id, title, badge_color, kind, product_id, sort_order')
+        .select('id, title, badge_color, kind, product_id, sort_order, description')
         .eq('account_id', ctx.accountId)
         .eq('product_id', msg.productId)
         .in('kind', ['product', 'catalog'])
@@ -67,7 +68,8 @@ export async function POST(request: Request) {
         row.badge_color !== badge_color ||
         row.kind !== 'catalog' ||
         row.product_id !== msg.productId ||
-        Number(row.sort_order) !== sort_order
+        Number(row.sort_order) !== sort_order ||
+        (row.description ?? null) !== description
 
       if (needsUpdate) {
         const { error } = await db
@@ -77,6 +79,7 @@ export async function POST(request: Request) {
             kind: 'catalog',
             catalog_message_id: msg.id,
             badge_color,
+            description,
             product_id: msg.productId,
             sort_order,
             content_text: null,
@@ -86,10 +89,10 @@ export async function POST(request: Request) {
           .eq('account_id', ctx.accountId)
         if (error) {
           const hint =
-            /badge_color|catalog_message_id|product_id|sort_order|schema cache/i.test(
+            /badge_color|catalog_message_id|product_id|sort_order|description|schema cache/i.test(
               error.message,
             )
-              ? ' Run pending WhatsappBot supabase migrations (040_quick_replies_sort_order.sql), then click Import again.'
+              ? ' Run pending WhatsappBot supabase migrations (042_quick_replies_description.sql), then click Import again.'
               : ''
           return NextResponse.json(
             { error: error.message + hint },
@@ -108,6 +111,7 @@ export async function POST(request: Request) {
       kind: 'catalog',
       catalog_message_id: msg.id,
       badge_color,
+      description,
       product_id: msg.productId,
       sort_order,
       content_text: null,
@@ -115,10 +119,10 @@ export async function POST(request: Request) {
     })
     if (error) {
       const hint =
-        /badge_color|catalog_message_id|product_id|sort_order|schema cache/i.test(
+        /badge_color|catalog_message_id|product_id|sort_order|description|schema cache/i.test(
           error.message,
         )
-          ? ' Run pending WhatsappBot supabase migrations (040_quick_replies_sort_order.sql), then click Import again.'
+          ? ' Run pending WhatsappBot supabase migrations (042_quick_replies_description.sql), then click Import again.'
           : ''
       return NextResponse.json(
         { error: error.message + hint },

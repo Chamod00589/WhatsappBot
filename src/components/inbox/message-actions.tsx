@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import { CornerUpLeft, Copy, SmilePlus } from "lucide-react";
+import { CornerUpLeft, Copy, ReceiptText, SmilePlus } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
@@ -20,6 +20,8 @@ interface MessageActionsProps {
   message: Message;
   onReply: () => void;
   onReact: (emoji: string) => void;
+  /** Seed Create Order with this message’s text (inbound address messages). */
+  onUseForOrder?: (text: string) => void;
   children: ReactNode;
 }
 
@@ -32,6 +34,7 @@ export function MessageActions({
   message,
   onReply,
   onReact,
+  onUseForOrder,
   children,
 }: MessageActionsProps) {
   const t = useTranslations("Inbox.actions");
@@ -44,6 +47,10 @@ export function MessageActions({
 
   const isAgent =
     message.sender_type === "agent" || message.sender_type === "bot";
+  const canUseForOrder =
+    !!onUseForOrder &&
+    !isAgent &&
+    !!(message.content_text && message.content_text.trim());
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -73,6 +80,16 @@ export function MessageActions({
 
   const handleReply = () => {
     onReply();
+    setTouchOpen(false);
+  };
+
+  const handleUseForOrder = () => {
+    const text = message.content_text?.trim() ?? "";
+    if (!text) {
+      toast.error(t("nothingForOrder"));
+      return;
+    }
+    onUseForOrder?.(text);
     setTouchOpen(false);
   };
 
@@ -144,6 +161,17 @@ export function MessageActions({
         >
           <Copy className="h-3.5 w-3.5" />
         </button>
+        {canUseForOrder ? (
+          <button
+            type="button"
+            onClick={handleUseForOrder}
+            className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
+            aria-label={t("useForOrder")}
+            title={t("useForOrder")}
+          >
+            <ReceiptText className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
       </div>
       </div>
     </div>

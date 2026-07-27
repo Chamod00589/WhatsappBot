@@ -657,6 +657,8 @@ export interface QuickReply {
   catalog_message_id?: string | null;
   /** Badge color from admin quick messages (hex). */
   badge_color?: string | null;
+  /** Agent-facing blurb imported from ladiesbags admin. */
+  description?: string | null;
   /** Mirrors ladiesbags.lk /admin/quick-messages sort_order. */
   sort_order?: number | null;
   created_at: string;
