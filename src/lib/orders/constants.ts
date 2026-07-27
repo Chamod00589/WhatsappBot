@@ -176,6 +176,43 @@ export function normalizeOrderTextMobilePhones(text: string): string {
   return '@@' + normalized.join('\n@@')
 }
 
+/**
+ * Collect Phone 1 / Phone 2 from an @@ order block, plus any other SL mobiles
+ * found in the address text — used for duplicate-order checks.
+ */
+export function extractPhonesFromOrderText(text: string): string[] {
+  const found: string[] = []
+  const add = (raw: string) => {
+    const n = normalizeSlMobile10(raw)
+    if (n && !found.includes(n)) found.push(n)
+  }
+
+  if (text.includes('@@')) {
+    const chunks = text
+      .split('@@')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const productIdx = chunks.findIndex((c) => c.includes('::'))
+    const fieldChunks =
+      productIdx >= 0 ? chunks.filter((_, i) => i !== productIdx) : chunks
+    // Phone fields start at index 2 (name, address, phone1, phone2…)
+    for (let i = 2; i < fieldChunks.length; i++) {
+      const firstLine = (fieldChunks[i] || '').split('\n')[0] || ''
+      add(firstLine)
+    }
+    // Also scan address (and whole text) for embedded mobiles.
+    for (const chunk of fieldChunks) {
+      const matches = chunk.match(/0\d{9}|\+94\d{9}|94\d{9}/g) || []
+      for (const m of matches) add(m)
+    }
+  } else {
+    const matches = text.match(/0\d{9}|\+94\d{9}|94\d{9}/g) || []
+    for (const m of matches) add(m)
+  }
+
+  return found
+}
+
 export interface OrderLineItem {
   name: string
   color: string

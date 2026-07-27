@@ -117,7 +117,7 @@ export function OrderProductPicker({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[90vh] max-w-md flex-col gap-3 overflow-hidden sm:max-w-lg">
+      <DialogContent className="flex max-h-[90vh] max-w-lg flex-col gap-3 overflow-hidden sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{title || t('addProduct')}</DialogTitle>
         </DialogHeader>
@@ -148,7 +148,7 @@ export function OrderProductPicker({
                   {t('noProducts')}
                 </div>
               ) : (
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-2">
                   {filtered.map((p) => {
                     const thumb = p.images[0] || ''
                     return (
@@ -207,7 +207,7 @@ export function OrderProductPicker({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               {colors.map((c, idx) => {
                 const thumb = catalogImageForColor(selected, c || selected.colors[0] || '')
                 const isSelected = (c || '') === (color || '')

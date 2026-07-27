@@ -27,8 +27,10 @@ import {
   buildOrderScreenshotCaption,
   buildOrderTextWithProducts,
   DUPLICATE_ORDER_DAYS,
+  extractPhonesFromOrderText,
   formatLkr,
   normalizeOrderTextMobilePhones,
+  normalizeSlMobile10,
   type OrderLineItem,
   type OrderPaymentStatus,
 } from '@/lib/orders/constants'
@@ -171,9 +173,17 @@ export function CreateOrderDialog({
 
     try {
       const phone = (contactPhone || '').trim()
-      if (phone) {
+      // Check every phone in the @@ block (Phone 1 / Phone 2 / embedded) plus
+      // the open-chat WhatsApp number — any hit within 3 days blocks create.
+      const phonesToCheck = [
+        ...extractPhonesFromOrderText(text),
+        normalizeSlMobile10(phone),
+      ].filter(Boolean)
+      const uniquePhones = [...new Set(phonesToCheck)]
+
+      for (const checkPhone of uniquePhones) {
         const dupRes = await fetch(
-          `/api/orders/by-phone?phone=${encodeURIComponent(phone)}&days=${DUPLICATE_ORDER_DAYS}&whatsapp_only=1`,
+          `/api/orders/by-phone?phone=${encodeURIComponent(checkPhone)}&days=${DUPLICATE_ORDER_DAYS}`,
         )
         const dupData = await dupRes.json().catch(() => ({}))
         if (dupRes.ok && dupData?.order) {
