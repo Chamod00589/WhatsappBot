@@ -243,6 +243,8 @@
       "backToProducts": "Back to products",
       "color": "Color",
       "quantity": "Quantity",
+      "decreaseQty": "Decrease quantity",
+      "increaseQty": "Increase quantity",
       "doubleClickColorHint": "Click to select, double-click to add 1 pc",
       "pickerProductHint": "Pick a product, then a color and quantity.",
       "pickerColorHint": "Pick a color (double-click for 1 pc)",

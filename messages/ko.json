@@ -243,6 +243,8 @@
       "backToProducts": "제품 목록으로",
       "color": "색상",
       "quantity": "수량",
+      "decreaseQty": "수량 줄이기",
+      "increaseQty": "수량 늘리기",
       "doubleClickColorHint": "클릭하여 선택, 더블클릭하면 1개 추가",
       "pickerProductHint": "제품을 선택한 뒤 색상과 수량을 고르세요.",
       "pickerColorHint": "색상을 선택하세요 (더블클릭 시 1개)",

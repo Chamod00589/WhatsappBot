@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, Loader2, Search } from 'lucide-react'
+import { ArrowLeft, Loader2, Minus, Plus, Search } from 'lucide-react'
 import { useTranslations } from 'next-intl'
 import { toast } from 'sonner'
 
@@ -253,32 +253,50 @@ export function OrderProductPicker({
             </div>
 
             <div className="flex items-center gap-2 pt-1">
-              <label
-                htmlFor="order-picker-qty"
-                className="text-xs font-medium text-muted-foreground"
-              >
+              <span className="text-xs font-medium text-muted-foreground">
                 {t('quantity')}
-              </label>
-              <Input
-                id="order-picker-qty"
-                type="number"
-                min={1}
-                max={99}
-                value={qty}
-                onChange={(e) =>
-                  setQty(Math.max(1, Math.min(99, Number(e.target.value) || 1)))
-                }
-                onKeyDown={(e) => {
-                  if (e.key !== 'Enter') return
-                  e.preventDefault()
-                  confirmSelected()
-                }}
-                className="h-8 w-16"
-              />
+              </span>
+              <div className="flex items-center rounded-lg border border-border">
+                <button
+                  type="button"
+                  aria-label={t('decreaseQty')}
+                  disabled={qty <= 1}
+                  onClick={() => setQty((q) => Math.max(1, q - 1))}
+                  className="flex h-10 w-10 items-center justify-center text-foreground disabled:opacity-40"
+                >
+                  <Minus className="h-4 w-4" />
+                </button>
+                <Input
+                  id="order-picker-qty"
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={99}
+                  value={qty}
+                  onChange={(e) =>
+                    setQty(Math.max(1, Math.min(99, Number(e.target.value) || 1)))
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return
+                    e.preventDefault()
+                    confirmSelected()
+                  }}
+                  className="h-10 w-12 border-0 bg-transparent px-0 text-center shadow-none focus-visible:ring-0"
+                />
+                <button
+                  type="button"
+                  aria-label={t('increaseQty')}
+                  disabled={qty >= 99}
+                  onClick={() => setQty((q) => Math.min(99, q + 1))}
+                  className="flex h-10 w-10 items-center justify-center text-foreground disabled:opacity-40"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
               <Button
                 type="button"
                 size="sm"
-                className="ml-auto"
+                className="ml-auto h-10"
                 onClick={confirmSelected}
               >
                 {addLabel || t('addToOrder')}
