@@ -528,7 +528,7 @@ export function MessageThread({
 
   const handleSendInteractive = useCallback(
     async (payload: InteractiveMessagePayload, replyToId?: string) => {
-      if (!conversation) return;
+      if (!conversation) return false;
 
       const tempId = `temp-${Date.now()}`;
       // Optimistic bubble — renders the buttons/list immediately via the
@@ -565,15 +565,17 @@ export function MessageThread({
           console.error("Failed to send interactive message:", reason);
           toast.error(`Failed to send: ${reason}`);
           onUpdateMessage(tempId, { status: "failed" });
-          return;
+          return false;
         }
 
         onUpdateMessage(tempId, { status: "sent" });
+        return true;
       } catch (err) {
         console.error("Failed to send interactive message:", err);
         const reason = err instanceof Error ? err.message : "network error";
         toast.error(`Failed to send: ${reason}`);
         onUpdateMessage(tempId, { status: "failed" });
+        return false;
       }
     },
     [conversation, onNewMessage, onUpdateMessage],

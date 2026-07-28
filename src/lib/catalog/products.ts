@@ -16,6 +16,8 @@ export interface CatalogQuickMessage {
   productId: string | null
   sortOrder: number
   badgeColor: string
+  /** Extra search needles for Sales Agent product matching. */
+  matchAliases?: string[]
 }
 
 export function catalogBaseUrl(): string {
@@ -67,6 +69,9 @@ function normalizeQuickMessage(raw: unknown): CatalogQuickMessage | null {
   const productId = typeof m.productId === 'string' ? m.productId : null
   const sortOrder = Number(m.sortOrder) || 0
   const jpegReady = m.jpegReady === true
+  const matchAliases = Array.isArray(m.matchAliases)
+    ? m.matchAliases.filter((u): u is string => typeof u === 'string' && !!u.trim())
+    : []
   return {
     id,
     title,
@@ -77,6 +82,7 @@ function normalizeQuickMessage(raw: unknown): CatalogQuickMessage | null {
     productId,
     sortOrder,
     badgeColor,
+    matchAliases,
   }
 }
 

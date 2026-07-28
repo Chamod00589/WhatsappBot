@@ -43,6 +43,16 @@ export interface AiConfig {
    *  knowledge base is embedded and semantic retrieval turns on; when
    *  null, retrieval falls back to lexical full-text search. */
   embeddingsApiKey: string | null
+  /** Ladies Bags Sales Agent master switch (migration 043). */
+  salesAgentEnabled?: boolean
+  saProductMatch?: boolean
+  saIdentify?: boolean
+  saCustomQrMatch?: boolean
+  saAiText?: boolean
+  saCreateOrder?: boolean
+  saQuotation?: boolean
+  saTracking?: boolean
+  saEditOrder?: boolean
 }
 
 /** A single conversation turn in the shape both providers accept. */

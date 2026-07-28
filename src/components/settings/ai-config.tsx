@@ -73,10 +73,19 @@ export function AiConfig() {
   const [systemPrompt, setSystemPrompt] = useState('');
   const [isActive, setIsActive] = useState(false);
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
-  const [maxPerConversation, setMaxPerConversation] = useState(3);
+  const [maxPerConversation, setMaxPerConversation] = useState(50);
   // Empty string = leave unassigned (shared queue).
   const [handoffAgentId, setHandoffAgentId] = useState('');
   const [members, setMembers] = useState<AccountMember[]>([]);
+  const [salesAgentEnabled, setSalesAgentEnabled] = useState(true);
+  const [saProductMatch, setSaProductMatch] = useState(true);
+  const [saIdentify, setSaIdentify] = useState(true);
+  const [saCustomQrMatch, setSaCustomQrMatch] = useState(true);
+  const [saAiText, setSaAiText] = useState(true);
+  const [saCreateOrder, setSaCreateOrder] = useState(true);
+  const [saQuotation, setSaQuotation] = useState(true);
+  const [saTracking, setSaTracking] = useState(true);
+  const [saEditOrder, setSaEditOrder] = useState(true);
 
   // Guard keyed on the account (not a bare boolean) so an in-place
   // account switch — ownership transfer, multi-account membership —
@@ -100,8 +109,17 @@ export function AiConfig() {
         setSystemPrompt(data.system_prompt ?? '');
         setIsActive(data.is_active);
         setAutoReplyEnabled(data.auto_reply_enabled);
-        setMaxPerConversation(data.auto_reply_max_per_conversation ?? 3);
+        setMaxPerConversation(data.auto_reply_max_per_conversation ?? 50);
         setHandoffAgentId(data.handoff_agent_id ?? '');
+        setSalesAgentEnabled(data.sales_agent_enabled ?? true);
+        setSaProductMatch(data.sa_product_match ?? true);
+        setSaIdentify(data.sa_identify ?? true);
+        setSaCustomQrMatch(data.sa_custom_qr_match ?? true);
+        setSaAiText(data.sa_ai_text ?? true);
+        setSaCreateOrder(data.sa_create_order ?? true);
+        setSaQuotation(data.sa_quotation ?? true);
+        setSaTracking(data.sa_tracking ?? true);
+        setSaEditOrder(data.sa_edit_order ?? true);
         setHasStoredKey(Boolean(data.has_key));
         setApiKey(data.has_key ? MASKED_KEY : '');
         setKeyEdited(false);
@@ -152,6 +170,15 @@ export function AiConfig() {
     auto_reply_enabled: autoReplyEnabled,
     auto_reply_max_per_conversation: maxPerConversation,
     handoff_agent_id: handoffAgentId || null,
+    sales_agent_enabled: salesAgentEnabled,
+    sa_product_match: saProductMatch,
+    sa_identify: saIdentify,
+    sa_custom_qr_match: saCustomQrMatch,
+    sa_ai_text: saAiText,
+    sa_create_order: saCreateOrder,
+    sa_quotation: saQuotation,
+    sa_tracking: saTracking,
+    sa_edit_order: saEditOrder,
   });
 
   const handleTest = async () => {
@@ -448,17 +475,65 @@ export function AiConfig() {
                 id="ai-max"
                 type="number"
                 min={1}
-                max={20}
+                max={100}
                 value={maxPerConversation}
                 onChange={(e) =>
                   setMaxPerConversation(
-                    Math.min(20, Math.max(1, Number(e.target.value) || 1)),
+                    Math.min(100, Math.max(1, Number(e.target.value) || 1)),
                   )
                 }
                 disabled={disabled || !autoReplyEnabled}
                 className="w-20"
               />
             </div>
+
+            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
+              <div>
+                <p className="text-sm font-medium text-foreground">
+                  {t('salesAgent')}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t('salesAgentDesc')}
+                </p>
+              </div>
+              <Switch
+                checked={salesAgentEnabled}
+                onCheckedChange={setSalesAgentEnabled}
+                disabled={disabled || !autoReplyEnabled}
+              />
+            </div>
+
+            {salesAgentEnabled && autoReplyEnabled ? (
+              <div className="space-y-2 rounded-md border border-border p-3">
+                <p className="text-xs font-medium text-muted-foreground">
+                  {t('salesAgentCaps')}
+                </p>
+                {(
+                  [
+                    [saProductMatch, setSaProductMatch, 'saProductMatch'],
+                    [saIdentify, setSaIdentify, 'saIdentify'],
+                    [saCustomQrMatch, setSaCustomQrMatch, 'saCustomQrMatch'],
+                    [saAiText, setSaAiText, 'saAiText'],
+                    [saCreateOrder, setSaCreateOrder, 'saCreateOrder'],
+                    [saQuotation, setSaQuotation, 'saQuotation'],
+                    [saTracking, setSaTracking, 'saTracking'],
+                    [saEditOrder, setSaEditOrder, 'saEditOrder'],
+                  ] as const
+                ).map(([checked, setChecked, key]) => (
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-3"
+                  >
+                    <p className="text-sm text-foreground">{t(key)}</p>
+                    <Switch
+                      checked={checked}
+                      onCheckedChange={setChecked}
+                      disabled={disabled}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : null}
 
             <div className="space-y-2">
               <Label htmlFor="ai-handoff">{t('handoffTo')}</Label>

@@ -30,17 +30,44 @@ export async function GET() {
       // `api_key` is selected only to derive `has_key` — it is stripped
       // out below and never returned to the client.
       .select(
-        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key',
+        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key, sales_agent_enabled, sa_product_match, sa_identify, sa_custom_qr_match, sa_ai_text, sa_create_order, sa_quotation, sa_tracking, sa_edit_order',
       )
       .eq('account_id', accountId)
       .maybeSingle()
 
     if (error) {
-      console.error('[ai/config GET] fetch error:', error)
-      return NextResponse.json(
-        { error: 'Failed to load AI configuration' },
-        { status: 500 },
-      )
+      // Pre-migration 043 DBs lack sales_agent_* columns — fall back.
+      const { data: legacy, error: legacyErr } = await supabase
+        .from('ai_configs')
+        .select(
+          'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key',
+        )
+        .eq('account_id', accountId)
+        .maybeSingle()
+      if (legacyErr) {
+        console.error('[ai/config GET] fetch error:', legacyErr)
+        return NextResponse.json(
+          { error: 'Failed to load AI configuration' },
+          { status: 500 },
+        )
+      }
+      if (!legacy) return NextResponse.json({ configured: false })
+      const { api_key, embeddings_api_key, ...safe } = legacy
+      return NextResponse.json({
+        configured: true,
+        has_key: !!api_key,
+        has_embeddings_key: !!embeddings_api_key,
+        sales_agent_enabled: true,
+        sa_product_match: true,
+        sa_identify: true,
+        sa_custom_qr_match: true,
+        sa_ai_text: true,
+        sa_create_order: true,
+        sa_quotation: true,
+        sa_tracking: true,
+        sa_edit_order: true,
+        ...safe,
+      })
     }
 
     if (!data) return NextResponse.json({ configured: false })
@@ -92,8 +119,21 @@ export async function POST(request: Request) {
     const autoReplyEnabled = body.auto_reply_enabled === true
 
     let maxPer = Number(body.auto_reply_max_per_conversation)
-    if (!Number.isFinite(maxPer)) maxPer = 3
-    maxPer = Math.min(20, Math.max(1, Math.floor(maxPer)))
+    if (!Number.isFinite(maxPer)) maxPer = 50
+    maxPer = Math.min(100, Math.max(1, Math.floor(maxPer)))
+
+    const boolField = (key: string, fallback: boolean) =>
+      typeof body[key] === 'boolean' ? body[key] === true : fallback
+
+    const salesAgentEnabled = boolField('sales_agent_enabled', true)
+    const saProductMatch = boolField('sa_product_match', true)
+    const saIdentify = boolField('sa_identify', true)
+    const saCustomQrMatch = boolField('sa_custom_qr_match', true)
+    const saAiText = boolField('sa_ai_text', true)
+    const saCreateOrder = boolField('sa_create_order', true)
+    const saQuotation = boolField('sa_quotation', true)
+    const saTracking = boolField('sa_tracking', true)
+    const saEditOrder = boolField('sa_edit_order', true)
 
     // Handoff routing target for auto-reply. A non-empty string must be a
     // member of this account (else the conversation would be assigned to a
@@ -205,6 +245,15 @@ export async function POST(request: Request) {
       is_active: isActive,
       auto_reply_enabled: autoReplyEnabled,
       auto_reply_max_per_conversation: maxPer,
+      sales_agent_enabled: salesAgentEnabled,
+      sa_product_match: saProductMatch,
+      sa_identify: saIdentify,
+      sa_custom_qr_match: saCustomQrMatch,
+      sa_ai_text: saAiText,
+      sa_create_order: saCreateOrder,
+      sa_quotation: saQuotation,
+      sa_tracking: saTracking,
+      sa_edit_order: saEditOrder,
     }
     // Only touch the handoff target when the form actually sent the field,
     // so a partial save (e.g. flipping a toggle) doesn't wipe it.

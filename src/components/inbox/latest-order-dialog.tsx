@@ -29,7 +29,6 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { catalogBaseUrl } from '@/lib/catalog/products'
 import {
   extractPhonesFromOrderText,
   formatLkr,
@@ -40,6 +39,12 @@ import {
   SHIPPING_METHOD_OPTIONS,
   type OrderLineItem,
 } from '@/lib/orders/constants'
+import {
+  buildCustomerTrackingText,
+  publicCustomerTrackingUrl,
+  type TrackingStatusPayload,
+} from '@/lib/orders/customer-tracking-message'
+
 type EditLine = {
   productId: string
   name: string
@@ -76,15 +81,6 @@ function itemToEditLine(it: LadiesbagsOrderItem): EditLine | null {
     price: num(it.price),
     image: typeof it.image === 'string' ? it.image : undefined,
   }
-}
-
-function customerTrackingUrl(order: LadiesbagsOrder): string | null {
-  const tracking = order.tracking_number?.trim()
-  if (!tracking) return null
-  const shipping = order.shipping_method || 'courier'
-  if (shipping !== 'courier') return null
-  const base = catalogBaseUrl().replace(/\/$/, '')
-  return `${base}/tracking/${encodeURIComponent(tracking)}`
 }
 
 async function fetchOrderByPhone(
@@ -224,8 +220,14 @@ export function LatestOrderDialog({
   const courierNum = num(courierCharge)
   const grandTotal = itemsTotal + courierNum
 
-  const trackingUrl = order ? customerTrackingUrl(order) : null
+  const trackingUrl = order?.id
+    ? publicCustomerTrackingUrl({
+        orderId: order.id,
+        trackingNumber: order.tracking_number,
+      })
+    : null
   const labelId = order?.id ? formatOrderLabelBarcode(order.id) : ''
+  const canSendCustomerLink = Boolean(order?.id && trackingUrl)
 
   const startEdit = () => {
     if (!order) return
@@ -354,10 +356,56 @@ export function LatestOrderDialog({
   }
 
   const sendCustomerLink = async () => {
-    if (!order || !trackingUrl || sendingLink) return
+    if (!order?.id || !trackingUrl || sendingLink) return
     setSendingLink(true)
     try {
-      await onSendText(trackingUrl)
+      const displayTrackingId =
+        formatOrderLabelBarcode(order.id) ||
+        order.tracking_number?.trim() ||
+        'ORDER'
+      const lookupId = order.tracking_number?.trim() || displayTrackingId
+
+      let statusPayload: TrackingStatusPayload | null = null
+      try {
+        const res = await fetch(
+          `/api/orders/tracking-status?trackingNo=${encodeURIComponent(lookupId)}`,
+        )
+        const data = (await res
+          .json()
+          .catch(() => ({}))) as TrackingStatusPayload
+        if (res.ok) statusPayload = data
+      } catch {
+        // Continue without live Domex status.
+      }
+
+      if (!statusPayload) {
+        statusPayload = {
+          success: true,
+          isShipped: order.order_status === 'shipped',
+          order: { order_status: order.order_status },
+          contactBranch: {
+            location: 'Thambuttegama',
+            phone: '763568602',
+            phoneDisplay: '0763568602',
+          },
+        }
+      } else if (statusPayload.isShipped == null) {
+        statusPayload = {
+          ...statusPayload,
+          isShipped: order.order_status === 'shipped',
+          order: statusPayload.order ?? {
+            order_status: order.order_status,
+          },
+        }
+      }
+
+      const text = buildCustomerTrackingText({
+        displayTrackingId,
+        trackingUrl,
+        status: statusPayload,
+      })
+
+      await onSendText(text)
       toast.success(t('latestOrderLinkSent'))
     } catch (err) {
       toast.error(
@@ -477,7 +525,7 @@ export function LatestOrderDialog({
                   </div>
                 )}
 
-                {!trackingUrl ? (
+                {!canSendCustomerLink ? (
                   <p className="text-xs text-muted-foreground">
                     {t('latestOrderLinkUnavailable')}
                   </p>
@@ -707,7 +755,7 @@ export function LatestOrderDialog({
                   <Button
                     type="button"
                     variant="secondary"
-                    disabled={!trackingUrl || sendingLink}
+                    disabled={!canSendCustomerLink || sendingLink}
                     onClick={() => void sendCustomerLink()}
                     title={
                       trackingUrl
@@ -720,7 +768,7 @@ export function LatestOrderDialog({
                     ) : (
                       <Link2 className="mr-2 h-4 w-4" />
                     )}
-                    {t('latestOrderSendCustomerLink')}
+                    {t('latestOrderSendTrackingInfo')}
                   </Button>
                   <Button type="button" onClick={startEdit}>
                     <Pencil className="mr-2 h-4 w-4" />

@@ -180,10 +180,13 @@ export interface Conversation {
    *    checked against the account's per-conversation cap.
    *  - `ai_handoff_summary` — short internal note the bot wrote when it
    *    handed off, shown to whoever takes the thread over.
+   *  - `sa_identify_pending` — low-confidence bag identify awaiting confirm.
    */
   ai_autoreply_disabled?: boolean;
   ai_reply_count?: number;
   ai_handoff_summary?: string | null;
+  sa_identify_pending?: unknown;
+  sa_last_question_fp?: string | null;
 }
 
 // ============================================================
@@ -255,6 +258,11 @@ export interface Message {
    * badge in the inbox. Migration 033.
    */
   ai_generated?: boolean;
+  /**
+   * Compact blurb for Sales Agent context (migration 043). When set,
+   * the agent feeds this instead of full media/caption payloads.
+   */
+  ai_context_summary?: string | null;
 }
 
 export type ReactionActor = 'customer' | 'agent';
