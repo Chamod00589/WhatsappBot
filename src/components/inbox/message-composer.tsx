@@ -23,6 +23,7 @@ import {
   Zap,
   ReceiptText,
   ClipboardList,
+  PackageSearch,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { GatedButton } from "@/components/ui/gated-button";
@@ -123,6 +124,7 @@ interface MessageComposerProps {
   onSendProductQuickReply: (quickReplyId: string) => void | Promise<void>;
   onOpenTemplates: () => void;
   onOpenCreateOrder?: () => void;
+  onOpenLatestOrder?: () => void;
   onOpenQuotation?: () => void;
   replyTo?: ReplyDraft | null;
   onClearReply?: () => void;
@@ -148,6 +150,7 @@ export function MessageComposer({
   onSendProductQuickReply,
   onOpenTemplates,
   onOpenCreateOrder,
+  onOpenLatestOrder,
   onOpenQuotation,
   replyTo,
   onClearReply,
@@ -744,6 +747,21 @@ export function MessageComposer({
               onClick={onOpenCreateOrder}
             >
               <ReceiptText className="h-4 w-4" />
+            </GatedButton>
+          ) : null}
+
+          {onOpenLatestOrder ? (
+            <GatedButton
+              variant="ghost"
+              size="sm"
+              canAct={!readOnly}
+              gateReason="send messages"
+              disabled={inputsDisabled}
+              title={readOnly ? undefined : t("latestOrder")}
+              className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+              onClick={onOpenLatestOrder}
+            >
+              <PackageSearch className="h-4 w-4" />
             </GatedButton>
           ) : null}
 

@@ -21,6 +21,7 @@ export function toPickedLine(
   qty: number,
 ): OrderLineItem {
   return {
+    productId: product.id,
     name: product.name,
     color,
     qty: Math.max(1, qty || 1),

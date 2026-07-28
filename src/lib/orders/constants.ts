@@ -7,6 +7,7 @@ export const ORDER_STATUS_LABELS: Record<string, string> = {
   web_order: 'Web Order',
   chatbot: 'ChatBot',
   pending: 'Pending',
+  hold: 'Hold',
   confirmed: 'Confirmed',
   half_payment: 'Half payment',
   full_payment: 'Full payment',
@@ -16,6 +17,15 @@ export const ORDER_STATUS_LABELS: Record<string, string> = {
   cancelled: 'Cancelled',
   return: 'Return',
 }
+
+/** Status values agents can set when editing an order from the inbox. */
+export const ORDER_STATUS_OPTIONS = Object.keys(ORDER_STATUS_LABELS)
+
+export const SHIPPING_METHOD_OPTIONS = [
+  { value: 'courier', label: 'Courier' },
+  { value: 'speed_post', label: 'Post office / Speed Post' },
+  { value: 'store_pickup', label: 'Store pickup' },
+] as const
 
 export type OrderPaymentStatus = 'pending' | 'half_payment' | 'full_payment'
 
@@ -214,6 +224,8 @@ export function extractPhonesFromOrderText(text: string): string[] {
 }
 
 export interface OrderLineItem {
+  /** Catalog product id — required when patching order line items. */
+  productId?: string
   name: string
   color: string
   qty: number

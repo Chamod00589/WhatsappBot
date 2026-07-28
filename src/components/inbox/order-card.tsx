@@ -35,6 +35,8 @@ export interface LadiesbagsOrder {
   total_amount?: number | string
   amount_paid?: number | string
   tracking_number?: string
+  payment_method?: string
+  admin_notes?: string
 }
 
 function num(v: unknown): number {

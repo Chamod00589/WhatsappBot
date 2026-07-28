@@ -35,6 +35,7 @@ import { TemplatePicker } from "./template-picker";
 import { AiThreadBanner } from "./ai-thread-banner";
 import { buildReplyQuoteFields } from "./reply-quote";
 import { CreateOrderDialog } from "./create-order-dialog";
+import { LatestOrderDialog } from "./latest-order-dialog";
 import { QuotationDialog } from "./quotation-dialog";
 import { ContactTagChips } from "@/components/inbox/contact-tag-chips";
 import { ConversationThreadControls } from "@/components/inbox/conversation-thread-controls";
@@ -159,8 +160,12 @@ export function MessageThread({
   const [replyTo, setReplyTo] = useState<ReplyDraft | null>(null);
   const [tagsRefreshKey, setTagsRefreshKey] = useState(0);
   const [createOrderOpen, setCreateOrderOpen] = useState(false);
+  const [latestOrderOpen, setLatestOrderOpen] = useState(false);
   const [quotationOpen, setQuotationOpen] = useState(false);
   const [orderSeedText, setOrderSeedText] = useState<string | null>(null);
+  const [latestOrderSelection, setLatestOrderSelection] = useState<string | null>(
+    null,
+  );
   /** Last highlighted chat text — survives mousedown that clears the live selection. */
   const lastChatSelectionRef = useRef("");
 
@@ -1090,6 +1095,14 @@ export function MessageThread({
           setOrderSeedText(seed || null);
           setCreateOrderOpen(true);
         }}
+        onOpenLatestOrder={() => {
+          const live =
+            typeof window !== "undefined"
+              ? window.getSelection()?.toString()?.trim() ?? ""
+              : "";
+          setLatestOrderSelection(live || lastChatSelectionRef.current || null);
+          setLatestOrderOpen(true);
+        }}
         onOpenQuotation={() => setQuotationOpen(true)}
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}
@@ -1110,6 +1123,17 @@ export function MessageThread({
         seedText={orderSeedText}
         contactPhone={contact.phone}
         onSendMedia={handleSendMedia}
+      />
+
+      <LatestOrderDialog
+        open={latestOrderOpen}
+        onOpenChange={(open) => {
+          setLatestOrderOpen(open);
+          if (!open) setLatestOrderSelection(null);
+        }}
+        contactPhone={contact.phone}
+        selectionText={latestOrderSelection}
+        onSendText={handleSend}
       />
 
       <QuotationDialog

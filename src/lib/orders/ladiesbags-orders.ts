@@ -43,7 +43,7 @@ async function parseJson(res: Response): Promise<unknown> {
 }
 
 export async function ladiesbagsOrdersRequest(
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'PATCH',
   path: string,
   options?: {
     body?: unknown
@@ -111,5 +111,14 @@ export async function fetchOrderByPhone(options: {
       days: options.days,
       whatsapp_only: options.whatsappOnly ? '1' : undefined,
     },
+  })
+}
+
+export async function updateOrderOnLadiesbags(
+  orderId: string,
+  patch: Record<string, unknown>,
+): Promise<unknown> {
+  return ladiesbagsOrdersRequest('PATCH', '/api/orders/update', {
+    body: { order_id: orderId, ...patch },
   })
 }
