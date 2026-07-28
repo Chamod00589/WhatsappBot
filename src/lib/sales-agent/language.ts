@@ -9,7 +9,7 @@ export function hasSinhalaScript(text: string): boolean {
  */
 export function looksLikeSinglish(text: string): boolean {
   const t = text.toLowerCase()
-  return /\b(oyata|oyage|mokakda|mokadda|eka|needa|oni|onne|thama|karanna|denna|kohanada|kohomada|bag eka|price eka|delivery eka|hari|hariy|oyala|mata|wage)\b/.test(
+  return /\b(oyata|oyage|mokakda|mokadda|eka|needa|oni|onne|thama|karanna|denna|kohanada|kohomada|bag eka|price eka|delivery eka|hari|hariy|oyala|mata|wage|wenna|kochchara|kochcara|dawasak|dawas|yanwada|yanawada|ganna|dennako|puluvan|puluwang|nadda|neda|ehema|meka|eka da|kiyanna|kiyanna|thiyenawa|thiyena|enna|gihin|awilla|okada|hari da)\b/.test(
     t,
   )
 }

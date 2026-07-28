@@ -75,15 +75,22 @@ export async function providerHttpError(
       : status === 429
         ? 'rate_limited'
         : 'provider_error'
+
+  // OpenRouter privacy / guardrail blocks show up as 404 with this wording.
+  const isOpenRouterPrivacy =
+    /guardrail|data policy|privacy|no endpoints available/i.test(detail)
+
   const base =
     code === 'invalid_key'
       ? `${provider} rejected the API key`
       : code === 'rate_limited'
         ? `${provider} rate limit reached`
-        : `${provider} API error (${status})`
+        : isOpenRouterPrivacy
+          ? `${provider}: no model endpoint matches your privacy/guardrail settings. Open https://openrouter.ai/settings/privacy — allow OpenAI (or Azure), turn off Zero Data Retention for this model, or switch to a model your Allowed Providers can serve (e.g. google/gemini-2.0-flash-001).`
+          : `${provider} API error (${status})`
 
-  return new AiError(detail ? `${base}: ${detail}` : base, {
-    code,
+  return new AiError(detail && !isOpenRouterPrivacy ? `${base}: ${detail}` : base, {
+    code: isOpenRouterPrivacy ? 'openrouter_privacy' : code,
     // Surface an auth failure as 401 so the settings "Test key" button
     // can show "invalid key"; everything else is an upstream 502.
     status: code === 'invalid_key' ? 401 : 502,
