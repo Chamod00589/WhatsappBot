@@ -33,6 +33,7 @@ import {
 import { deleteAccountMedia } from "@/lib/storage/upload-media";
 import { TemplatePicker } from "./template-picker";
 import { AiThreadBanner } from "./ai-thread-banner";
+import { SalesAgentDebugPanel } from "./sales-agent-debug-panel";
 import { buildReplyQuoteFields } from "./reply-quote";
 import { CreateOrderDialog } from "./create-order-dialog";
 import { LatestOrderDialog } from "./latest-order-dialog";
@@ -1075,6 +1076,8 @@ export function MessageThread({
           }
         }}
       />
+
+      <SalesAgentDebugPanel conversationId={conversation.id} />
 
       {/* Composer */}
       <MessageComposer

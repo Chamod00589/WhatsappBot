@@ -1,7 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AiConfigWithSales } from './types'
 import type { ChatMessage, AiUsage } from '@/lib/ai/types'
-import { AiError } from '@/lib/ai/types'
 import { aiRequestTimeoutMs, HANDOFF_SENTINEL, MAX_OUTPUT_TOKENS } from '@/lib/ai/defaults'
 import { normalizeUsage, mergeConsecutive, toNetworkError, providerHttpError } from '@/lib/ai/providers/shared'
 import { buildSalesAgentTools, type ToolCallRequest } from './tools'
@@ -16,6 +15,7 @@ import { sendQuickReplyByCatalogId, sendLocalTextQuickReply } from './send-quick
 import { engineSendText } from '@/lib/flows/meta-send'
 import type { OrderLineItem } from '@/lib/orders/constants'
 import { languageHintForPrompt } from './language'
+import type { SalesAgentRunLogger } from './debug-log'
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
@@ -37,12 +37,15 @@ export interface ToolLoopArgs {
     description: string | null
     catalog_message_id: string | null
   }>
+  /** Optional troubleshoot logger from dispatch. */
+  debug?: SalesAgentRunLogger
 }
 
 export interface ToolLoopResult {
   replied: boolean
   handoff: boolean
   usage: AiUsage | null
+  replyText?: string
 }
 
 /**
@@ -54,7 +57,7 @@ export async function runSalesAgentToolLoop(
 ): Promise<ToolLoopResult> {
   const { config } = args
   if (!config.aiText) {
-    return { replied: false, handoff: false, usage: null }
+    return { replied: false, handoff: false, usage: null, replyText: undefined }
   }
 
   const systemPrompt = buildAgentSystemPrompt(args)
@@ -178,12 +181,25 @@ async function runOpenAiToolLoop(
 
   let replied = false
   let handoff = false
+  const toolLog: Array<{ name: string; arguments: unknown; result?: string }> =
+    []
 
   for (const call of toolCalls) {
+    args.debug?.step('tool', `Calling ${call.name}`, call.arguments)
     const result = await executeToolCall(args, call)
+    toolLog.push({
+      name: call.name,
+      arguments: call.arguments,
+      result: result.note,
+    })
+    args.debug?.step(
+      'tool',
+      `${call.name} → ${result.note || (result.replied ? 'ok' : 'no-op')}`,
+    )
     if (result.replied) replied = true
     if (result.handoff) handoff = true
   }
+  if (toolLog.length) args.debug?.set({ tools: toolLog })
 
   const text = (msg?.content || '').trim()
   if (text.includes(HANDOFF_SENTINEL)) {
@@ -211,7 +227,7 @@ async function runOpenAiToolLoop(
     replied = true
   }
 
-  return { replied, handoff, usage }
+  return { replied, handoff, usage, replyText: text || undefined }
 }
 
 async function runJsonActionLoop(
@@ -235,6 +251,9 @@ async function runJsonActionLoop(
 
   let replied = false
   let handoff = false
+  let replyText: string | undefined
+  const toolLog: Array<{ name: string; arguments: unknown; result?: string }> =
+    []
   try {
     const jsonText = extractJson(result.text)
     const parsed = JSON.parse(jsonText) as {
@@ -244,15 +263,23 @@ async function runJsonActionLoop(
     }
     if (parsed.handoff) handoff = true
     for (const a of parsed.actions ?? []) {
+      args.debug?.step('tool', `Calling ${a.name}`, a.arguments)
       const r = await executeToolCall(args, {
         id: a.name,
         name: a.name,
         arguments: a.arguments ?? {},
       })
+      toolLog.push({
+        name: a.name,
+        arguments: a.arguments ?? {},
+        result: r.note,
+      })
       if (r.replied) replied = true
       if (r.handoff) handoff = true
     }
+    if (toolLog.length) args.debug?.set({ tools: toolLog })
     const reply = (parsed.reply || '').trim()
+    replyText = reply
     if (reply && !reply.includes(HANDOFF_SENTINEL)) {
       await engineSendText({
         accountId: args.accountId,
@@ -268,6 +295,7 @@ async function runJsonActionLoop(
   } catch (err) {
     // Fallback: treat as plain text
     const text = result.text.replace(HANDOFF_SENTINEL, '').trim()
+    replyText = text
     if (result.text.includes(HANDOFF_SENTINEL)) handoff = true
     else if (text) {
       await engineSendText({
@@ -284,7 +312,7 @@ async function runJsonActionLoop(
     }
   }
 
-  return { replied, handoff, usage: result.usage }
+  return { replied, handoff, usage: result.usage, replyText }
 }
 
 function extractJson(raw: string): string {
@@ -299,7 +327,7 @@ function extractJson(raw: string): string {
 async function executeToolCall(
   args: ToolLoopArgs,
   call: ToolCallRequest,
-): Promise<{ replied: boolean; handoff: boolean }> {
+): Promise<{ replied: boolean; handoff: boolean; note: string }> {
   const { db, accountId, conversationId, contactId, configOwnerUserId } = args
   const a = call.arguments
 
@@ -319,7 +347,7 @@ async function executeToolCall(
               ? `Sent quick reply: ${a.reason}`
               : `Sent catalog quick reply ${catalogId}`,
         })
-        return { replied: true, handoff: false }
+        return { replied: true, handoff: false, note: `sent catalog ${catalogId}` }
       }
       if (qrId) {
         const { data: qr } = await db
@@ -336,7 +364,11 @@ async function executeToolCall(
             catalogMessageId: qr.catalog_message_id,
             contextSummary: qr.description || qr.title,
           })
-          return { replied: true, handoff: false }
+          return {
+            replied: true,
+            handoff: false,
+            note: `sent QR ${qr.title}`,
+          }
         }
         if (qr?.kind === 'text' && qr.content_text) {
           await sendLocalTextQuickReply({
@@ -348,10 +380,14 @@ async function executeToolCall(
             text: qr.content_text,
             contextSummary: qr.description || qr.title,
           })
-          return { replied: true, handoff: false }
+          return {
+            replied: true,
+            handoff: false,
+            note: `sent text QR ${qr.title}`,
+          }
         }
       }
-      return { replied: false, handoff: false }
+      return { replied: false, handoff: false, note: 'quick reply not found' }
     }
     case 'create_order': {
       const addressText =
@@ -368,7 +404,7 @@ async function executeToolCall(
         contactPhone: args.contactPhone,
         useSinglish: args.useSinglish,
       })
-      return { replied: r.ok, handoff: false }
+      return { replied: r.ok, handoff: false, note: r.message }
     }
     case 'send_quotation': {
       const items = normalizeItems(a.items)
@@ -381,10 +417,12 @@ async function executeToolCall(
         items,
         useSinglish: args.useSinglish,
       })
-      return { replied: r.ok, handoff: false }
+      return { replied: r.ok, handoff: false, note: r.message }
     }
     case 'send_tracking': {
-      if (!args.contactPhone) return { replied: false, handoff: false }
+      if (!args.contactPhone) {
+        return { replied: false, handoff: false, note: 'no contact phone' }
+      }
       const r = await actionSendTracking({
         db,
         accountId,
@@ -393,7 +431,7 @@ async function executeToolCall(
         configOwnerUserId,
         contactPhone: args.contactPhone,
       })
-      return { replied: r.ok, handoff: false }
+      return { replied: r.ok, handoff: false, note: r.message }
     }
     case 'edit_order': {
       const orderId = typeof a.order_id === 'string' ? a.order_id : ''
@@ -401,9 +439,11 @@ async function executeToolCall(
         a.patch && typeof a.patch === 'object'
           ? (a.patch as Record<string, unknown>)
           : {}
-      if (!orderId) return { replied: false, handoff: false }
-      await actionEditOrder({ orderId, patch })
-      return { replied: false, handoff: false }
+      if (!orderId) {
+        return { replied: false, handoff: false, note: 'missing order_id' }
+      }
+      const r = await actionEditOrder({ orderId, patch })
+      return { replied: false, handoff: false, note: r.message }
     }
     case 'mark_human': {
       await actionMarkHuman({
@@ -413,11 +453,11 @@ async function executeToolCall(
         contactId,
         reason: typeof a.reason === 'string' ? a.reason : undefined,
       })
-      return { replied: false, handoff: true }
+      return { replied: false, handoff: true, note: 'marked Human' }
     }
     default:
       console.warn('[sales-agent] unknown tool', call.name)
-      return { replied: false, handoff: false }
+      return { replied: false, handoff: false, note: `unknown tool ${call.name}` }
   }
 }
 
