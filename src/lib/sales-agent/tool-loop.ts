@@ -14,7 +14,7 @@ import {
 import { sendQuickReplyByCatalogId, sendLocalTextQuickReply } from './send-quick-reply'
 import { engineSendText } from '@/lib/flows/meta-send'
 import type { OrderLineItem } from '@/lib/orders/constants'
-import { languageHintForPrompt } from './language'
+import { languageHintForPrompt, type ReplyMode } from './language'
 import type { SalesAgentRunLogger } from './debug-log'
 import {
   OPENROUTER_ZDR_FALLBACK_MODEL,
@@ -38,6 +38,8 @@ export interface ToolLoopArgs {
   messages: ChatMessage[]
   systemExtra: string
   useSinglish: boolean
+  /** Preferred reply language; defaults from useSinglish when omitted. */
+  replyMode?: ReplyMode
   availableQuickReplies: Array<{
     id: string
     title: string
@@ -76,6 +78,8 @@ export async function runSalesAgentToolLoop(
 
 function buildAgentSystemPrompt(args: ToolLoopArgs): string {
   const { config, availableQuickReplies, useSinglish } = args
+  const replyMode: ReplyMode =
+    args.replyMode ?? (useSinglish ? 'singlish' : 'tanglish')
   const qrList = availableQuickReplies
     .slice(0, 80)
     .map(
@@ -89,7 +93,7 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
   const parts = [
     'You are the Ladies Bags WhatsApp sales agent for ladiesbags.lk.',
     'Prefer sending existing quick replies over inventing product prices or details.',
-    languageHintForPrompt(useSinglish),
+    languageHintForPrompt(replyMode),
     'Keep replies short. Do not repeat an answer the customer already received.',
     `If you cannot help safely (wholesale, unknown policy, angry customer), call mark_human or reply with exactly ${HANDOFF_SENTINEL}.`,
     'You may call tools to send quick replies, create orders, send quotations/tracking, edit orders, or escalate.',

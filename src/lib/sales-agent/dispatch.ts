@@ -11,7 +11,11 @@ import {
   stripTestMarker,
 } from './gates'
 import { buildSalesAgentContext } from './context'
-import { shouldUseSinglish } from './language'
+import {
+  askBagAddressText,
+  askWhichBagText,
+  detectReplyMode,
+} from './language'
 import {
   loadProductQuickReplies,
   matchProductsInText,
@@ -187,19 +191,21 @@ export async function dispatchSalesAgent(
       db,
       conversationId,
     )
-    const useSinglish = shouldUseSinglish(
+    const replyMode = detectReplyMode(
       [...customerTexts, inboundText].filter(Boolean),
     )
+    const useSinglish = replyMode === 'singlish'
     log.set({
       ai_context: messages.map((m) => ({
         role: m.role,
         content: m.content.slice(0, 400),
       })),
       use_singlish: useSinglish,
+      reply_mode: replyMode,
     })
     log.step(
       'context',
-      `Built ${messages.length} compact turns; singlish=${useSinglish}`,
+      `Built ${messages.length} compact turns; replyMode=${replyMode}`,
     )
 
     const { data: contact } = await db
@@ -245,6 +251,7 @@ export async function dispatchSalesAgent(
         configOwnerUserId,
         inboundText,
         useSinglish,
+        replyMode,
       })
       if (confirmed) {
         log.step('order_tag', 'Pending → Confirmed (customer OK)')
@@ -333,9 +340,7 @@ export async function dispatchSalesAgent(
           userId: configOwnerUserId,
           conversationId,
           contactId,
-          text: useSinglish
-            ? 'Address eka hambuna. Mokakda bag eka / color eka oyata oni?'
-            : 'Got your address. Which bag and color do you want?',
+          text: askWhichBagText(replyMode),
           aiGenerated: true,
         })
         handled = true
@@ -542,9 +547,7 @@ export async function dispatchSalesAgent(
         const intents = extractOrderIntents([inboundText], products)
         const withColor = intents.filter((i) => i.color)
         if (withColor.length && config.createOrder) {
-          const ask = useSinglish
-            ? 'Hari — order ekata name, address, district, phone number eka send karanna.'
-            : 'Please send your name, address, district, and phone number to place the order.'
+          const ask = askBagAddressText(replyMode)
           await engineSendText({
             accountId,
             userId: configOwnerUserId,
@@ -677,7 +680,8 @@ export async function dispatchSalesAgent(
       contactPhone,
       messages: loopMessages,
       systemExtra: '',
-      useSinglish,
+      useSinglish: replyMode === 'singlish',
+      replyMode,
       availableQuickReplies,
       debug: log,
     })

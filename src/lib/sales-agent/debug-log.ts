@@ -18,6 +18,7 @@ export interface SalesAgentRunPayload {
   /** Compact chat context fed to the model (role + content). */
   ai_context?: Array<{ role: string; content: string }>
   use_singlish?: boolean
+  reply_mode?: 'singlish' | 'tanglish'
   capabilities?: Record<string, boolean>
   product_hits?: Array<{ title: string; catalog_message_id: string | null }>
   custom_qr_match?: { title: string; score: number } | null

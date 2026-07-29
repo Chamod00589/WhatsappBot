@@ -161,6 +161,7 @@ interface SendMediaEngineArgs {
   caption?: string
   /** Document-only; ignored by Meta for image/video. */
   filename?: string
+  aiGenerated?: boolean
 }
 
 /**
@@ -250,6 +251,7 @@ export async function engineSendMedia(
     content_text: args.caption ?? null,
     message_id: waMessageId,
     status: 'sent',
+    ai_generated: args.aiGenerated ?? false,
   })
   if (msgErr) {
     throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)

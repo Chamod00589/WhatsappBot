@@ -22,7 +22,8 @@ import {
   type TrackingStatusPayload,
 } from '@/lib/orders/customer-tracking-message'
 import { formatOrderLabelBarcode } from '@/lib/orders/constants'
-import { buildServerOrderConfirmText } from '../order-confirm'
+import { catalogBaseUrl } from '@/lib/catalog/products'
+import { sendOrderConfirmScreenshot } from '../order-screenshot'
 import { addNamedTag } from '../tags'
 import { CONTEXT_BLURBS } from '../types'
 
@@ -117,39 +118,93 @@ export async function actionCreateOrder(args: {
     order_status: 'chatbot',
   })) as { order?: Record<string, unknown>; success?: boolean }
 
-  const order = (result?.order ?? result) as Record<string, unknown>
+  let order = (result?.order ?? result) as Record<string, unknown>
   if (!order || typeof order !== 'object') {
     return { ok: false, message: 'Order create returned no order' }
   }
 
-  const confirm = buildServerOrderConfirmText({
-    order: {
-      id: typeof order.id === 'string' ? order.id : undefined,
-      customer_name:
-        typeof order.customer_name === 'string' ? order.customer_name : null,
-      address: typeof order.address === 'string' ? order.address : null,
-      phone: typeof order.phone === 'string' ? order.phone : null,
-      phone2: typeof order.phone2 === 'string' ? order.phone2 : null,
-      total_amount: order.total_amount as number | string | null,
-      shipping_cost: order.shipping_cost as number | string | null,
-      items: order.items as never,
-    },
-    lineItems: items,
-    useSinglish,
-  })
+  // Prefer fresh full order (items, totals, courier) — same as inbox Create Order screenshot path.
+  const lookupPhone =
+    contactPhone ||
+    (typeof order.mobile_1 === 'string' ? order.mobile_1 : null) ||
+    (typeof order.whatsapp_phone === 'string' ? order.whatsapp_phone : null)
+  if (lookupPhone) {
+    try {
+      const fresh = (await fetchOrderByPhone({
+        phone: lookupPhone,
+        days: 3,
+        whatsappOnly: false,
+      })) as { order?: Record<string, unknown> }
+      if (fresh?.order && typeof fresh.order === 'object') {
+        order = fresh.order
+      }
+    } catch (err) {
+      console.warn('[sales-agent] post-create order refetch failed:', err)
+    }
+  }
 
-  await engineSendText({
-    accountId,
-    userId: configOwnerUserId,
-    conversationId,
-    contactId,
-    text: confirm.text,
-    aiGenerated: true,
-  })
-  await stampSummary(db, conversationId, confirm.contextSummary)
+  // Merge line items we know about if API returned empty items / zero total
+  if ((!Array.isArray(order.items) || order.items.length === 0) && items.length) {
+    order = {
+      ...order,
+      items: items.map((it) => ({
+        name: it.name,
+        color: it.color,
+        quantity: it.qty,
+        price: it.price,
+        productId: it.productId,
+        image: it.image,
+      })),
+    }
+  }
+  const itemsTotal = items.reduce((s, it) => s + it.price * it.qty, 0)
+  if (!numSafe(order.total_amount) && itemsTotal > 0) {
+    const courier = numSafe(order.courier_charge) || 400
+    order = {
+      ...order,
+      courier_charge: order.courier_charge ?? courier,
+      total_amount: itemsTotal + courier,
+    }
+  }
+
+  try {
+    await sendOrderConfirmScreenshot({
+      db,
+      accountId,
+      conversationId,
+      contactId,
+      configOwnerUserId,
+      order,
+    })
+  } catch (err) {
+    console.error('[sales-agent] order screenshot send failed:', err)
+    // Fallback: short Singlish/Tanglish text so customer still gets a confirm ask
+    const trackId = formatOrderLabelBarcode(String(order.id || ''))
+    const total = Math.round(numSafe(order.total_amount) || itemsTotal)
+    await engineSendText({
+      accountId,
+      userId: configOwnerUserId,
+      conversationId,
+      contactId,
+      text: useSinglish
+        ? `Order create una (total Rs ${total}/-). Details hari neda (bag color + address)? "ok" kiyanna.\nTracking: ${catalogBaseUrl().replace(/\/$/, '')}/tracking/${trackId}`
+        : `Order create aachu (total Rs ${total}/-). Details correct-a (bag color + address)? "ok" anupunga.\nTracking: ${catalogBaseUrl().replace(/\/$/, '')}/tracking/${trackId}`,
+      aiGenerated: true,
+    })
+    await stampSummary(db, conversationId, CONTEXT_BLURBS.orderConfirm)
+  }
+
   await addNamedTag(db, accountId, contactId, 'Pending')
 
-  return { ok: true, message: `Order created ${formatOrderLabelBarcode(String(order.id || ''))}` }
+  return {
+    ok: true,
+    message: `Order created ${formatOrderLabelBarcode(String(order.id || ''))}`,
+  }
+}
+
+function numSafe(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : 0
 }
 
 export async function actionSendTracking(args: {
@@ -260,7 +315,7 @@ export async function actionSendQuotation(args: {
   lines.push(
     useSinglish
       ? 'Order karanna oni nam name, address, phone number eka send karanna.'
-      : 'To order, please send your name, address, and phone number.',
+      : 'Order pannanum na name, address, phone number anupunga.',
   )
 
   await engineSendText({

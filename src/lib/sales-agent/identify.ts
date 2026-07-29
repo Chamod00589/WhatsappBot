@@ -15,7 +15,7 @@ import {
   matchProductByIdentifyName,
 } from './match-products'
 import { sendQuickReplyByCatalogId } from './send-quick-reply'
-import { identifyRejectText } from './identify-text'
+import { identifyRejectText, identifyConfirmAskText } from './identify-text'
 
 export { identifyRejectText } from './identify-text'
 
@@ -170,9 +170,12 @@ export async function handleInboundIdentify(args: {
     .update({ sa_identify_pending: pending })
     .eq('id', conversationId)
 
-  const ask = useSinglish
-    ? `Me bag eka da oyata oni? ${best.product} — ${best.color} (match ~${Math.round(best.confidence)}%). Hari nam reply karanna "ok".`
-    : `Is this the bag you're asking about? ${best.product} — ${best.color} (~${Math.round(best.confidence)}% match). Reply "ok" if yes.`
+  const ask = identifyConfirmAskText(
+    best.product,
+    best.color,
+    best.confidence,
+    useSinglish,
+  )
 
   // Send only the top matching product image + ask (not full QR yet)
   let imageSent = false

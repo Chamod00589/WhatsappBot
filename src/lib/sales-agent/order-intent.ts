@@ -300,7 +300,7 @@ export function buildColorAskText(
   if (useSinglish) {
     return `${names} eka ganna color eka mokakda? (${colorHint})`
   }
-  return `Which color do you want for ${names}? (${colorHint})`
+  return `${names} ku ethu color venum? (${colorHint})`
 }
 
 export function shouldRunOrderIntake(inboundText: string): boolean {

@@ -1,9 +1,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { addNamedTag, contactHasNamedTag, removeNamedTag } from './tags'
+import { orderConfirmedText, type ReplyMode } from './language'
 
 const CONFIRM_OK =
-  /^(ok|okay|yes|y|yeah|confirm|confirmed|hari|hariy|ow|correct)\b/i
+  /^(ok|okay|yes|y|yeah|confirm|confirmed|hari|hariy|ow|correct|seri|aama|aamaa|sari)\b/i
 
 /**
  * If contact is Pending and customer confirms the order screenshot,
@@ -17,6 +18,7 @@ export async function maybeConfirmOrderTag(args: {
   configOwnerUserId: string
   inboundText: string
   useSinglish: boolean
+  replyMode?: ReplyMode
 }): Promise<boolean> {
   const {
     db,
@@ -26,6 +28,7 @@ export async function maybeConfirmOrderTag(args: {
     conversationId,
     inboundText,
     useSinglish,
+    replyMode,
   } = args
 
   if (!CONFIRM_OK.test(inboundText.trim())) return false
@@ -36,14 +39,15 @@ export async function maybeConfirmOrderTag(args: {
   await removeNamedTag(db, accountId, contactId, 'Pending')
   await addNamedTag(db, accountId, contactId, 'Confirmed')
 
+  const mode: ReplyMode =
+    replyMode ?? (useSinglish ? 'singlish' : 'tanglish')
+
   await engineSendText({
     accountId,
     userId: configOwnerUserId,
     conversationId,
     contactId,
-    text: useSinglish
-      ? 'Order eka confirm una. Thank you!'
-      : 'Your order is confirmed. Thank you!',
+    text: orderConfirmedText(mode),
     aiGenerated: true,
   })
   return true
