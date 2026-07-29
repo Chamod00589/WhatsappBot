@@ -16,6 +16,13 @@ import { engineSendText } from '@/lib/flows/meta-send'
 import type { OrderLineItem } from '@/lib/orders/constants'
 import { languageHintForPrompt } from './language'
 import type { SalesAgentRunLogger } from './debug-log'
+import {
+  OPENROUTER_ZDR_FALLBACK_MODEL,
+  isOpenRouterPrivacyError,
+  openRouterProviderPreferences,
+  shouldSuggestOpenRouterZdrFallback,
+} from '@/lib/ai/providers/openrouter-routing'
+import { AiError } from '@/lib/ai/types'
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
@@ -106,35 +113,71 @@ async function runOpenAiToolLoop(
   const tools = buildSalesAgentTools(config)
   const timeoutMs = aiRequestTimeoutMs()
 
-  const body: Record<string, unknown> = {
-    model: config.model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      ...mergeConsecutive(args.messages),
-    ],
-    tools,
-    tool_choice: 'auto',
-    max_completion_tokens: MAX_OUTPUT_TOKENS,
-  }
+  const callModel = async (model: string): Promise<Response> => {
+    const body: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...mergeConsecutive(args.messages),
+      ],
+      tools,
+      tool_choice: 'auto',
+    }
+    if (config.provider === 'openrouter') {
+      body.max_tokens = MAX_OUTPUT_TOKENS
+      body.provider = openRouterProviderPreferences(model)
+    } else {
+      body.max_completion_tokens = MAX_OUTPUT_TOKENS
+    }
 
-  let res: Response
-  try {
-    res = await fetch(url, {
+    return fetch(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${config.apiKey}`,
         'Content-Type': 'application/json',
         ...(config.provider === 'openrouter'
-          ? { 'HTTP-Referer': 'https://ladiesbags.lk', 'X-Title': 'LadiesBags Sales Agent' }
+          ? {
+              'HTTP-Referer': 'https://ladiesbags.lk',
+              'X-Title': 'LadiesBags Sales Agent',
+            }
           : {}),
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     })
+  }
+
+  let res: Response
+  let usedModel = config.model
+  try {
+    res = await callModel(config.model)
+    if (
+      !res.ok &&
+      config.provider === 'openrouter' &&
+      shouldSuggestOpenRouterZdrFallback(config.model)
+    ) {
+      // Peek at body for privacy/ZDR 404, then retry with a ZDR-capable model.
+      const cloned = res.clone()
+      const err = await providerHttpError(config.provider, cloned)
+      if (isOpenRouterPrivacyError(err)) {
+        args.debug?.step(
+          'ai_tools',
+          `OpenRouter privacy blocked ${config.model} — retrying ${OPENROUTER_ZDR_FALLBACK_MODEL}`,
+        )
+        usedModel = OPENROUTER_ZDR_FALLBACK_MODEL
+        res = await callModel(OPENROUTER_ZDR_FALLBACK_MODEL)
+      } else {
+        throw err
+      }
+    }
   } catch (err) {
+    if (err instanceof AiError) throw err
     throw toNetworkError(err)
   }
   if (!res.ok) throw await providerHttpError(config.provider, res)
+  if (usedModel !== config.model) {
+    args.debug?.step('ai_tools', `Using fallback model ${usedModel}`)
+  }
 
   const data = (await res.json()) as {
     choices?: {

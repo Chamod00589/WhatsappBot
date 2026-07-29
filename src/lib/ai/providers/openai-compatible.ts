@@ -30,6 +30,8 @@ export interface OpenAiCompatibleOpts {
    * gateways still accept `max_tokens`.
    */
   maxTokensField?: 'max_tokens' | 'max_completion_tokens'
+  /** Extra top-level JSON fields merged into the request body. */
+  extraBody?: Record<string, unknown>
 }
 
 /**
@@ -46,6 +48,7 @@ export async function generateOpenAiCompatible(
     providerLabel,
     extraHeaders,
     maxTokensField = 'max_completion_tokens',
+    extraBody,
   } = opts
 
   const body: Record<string, unknown> = {
@@ -54,6 +57,7 @@ export async function generateOpenAiCompatible(
       { role: 'system', content: systemPrompt },
       ...mergeConsecutive(messages),
     ],
+    ...extraBody,
   }
   body[maxTokensField] = MAX_OUTPUT_TOKENS
 

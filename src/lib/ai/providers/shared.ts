@@ -86,7 +86,7 @@ export async function providerHttpError(
       : code === 'rate_limited'
         ? `${provider} rate limit reached`
         : isOpenRouterPrivacy
-          ? `${provider}: no model endpoint matches your privacy/guardrail settings. Open https://openrouter.ai/settings/privacy — allow OpenAI (or Azure), turn off Zero Data Retention for this model, or switch to a model your Allowed Providers can serve (e.g. google/gemini-2.0-flash-001).`
+          ? `${provider}: no model endpoint matches your privacy/ZDR settings. With OpenAI ZDR on, openai/* only works via Azure (often needs BYOK). Fix: (1) Agents → set model to google/gemini-2.5-flash, or (2) open https://openrouter.ai/settings/privacy and turn OFF Zero Data Retention for OpenAI / Non-frontier, or add Azure with BYOK. Docs: https://openrouter.ai/docs/guides/features/zdr`
           : `${provider} API error (${status})`
 
   return new AiError(detail && !isOpenRouterPrivacy ? `${base}: ${detail}` : base, {

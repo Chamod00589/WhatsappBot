@@ -325,6 +325,11 @@ export function AiConfig() {
                   placeholder={AI_PROVIDER_DEFAULT_MODEL[provider]}
                   disabled={disabled}
                 />
+                {provider === 'openrouter' ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t('openrouterZdrHint')}
+                  </p>
+                ) : null}
               </div>
             </div>
 
