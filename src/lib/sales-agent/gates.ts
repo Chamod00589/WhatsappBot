@@ -13,6 +13,7 @@ export interface GateResult {
     ai_reply_count: number
     sa_identify_pending: unknown
     sa_last_question_fp: string | null
+    sa_order_pending: unknown
   }
   hasHumanTag: boolean
 }
@@ -134,7 +135,7 @@ export async function evaluateSalesAgentGates(
   const { data: conv, error } = await db
     .from('conversations')
     .select(
-      'assigned_agent_id, ai_autoreply_disabled, ai_reply_count, sa_identify_pending, sa_last_question_fp',
+      'assigned_agent_id, ai_autoreply_disabled, ai_reply_count, sa_identify_pending, sa_last_question_fp, sa_order_pending',
     )
     .eq('id', conversationId)
     .maybeSingle()
@@ -152,6 +153,7 @@ export async function evaluateSalesAgentGates(
       ai_reply_count: Number(conv.ai_reply_count) || 0,
       sa_identify_pending: conv.sa_identify_pending,
       sa_last_question_fp: conv.sa_last_question_fp ?? null,
+      sa_order_pending: conv.sa_order_pending ?? null,
     },
     hasHumanTag: false,
   }

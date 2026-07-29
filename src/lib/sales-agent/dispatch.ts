@@ -34,9 +34,23 @@ import {
   rememberAnsweredQuestion,
 } from './dedupe'
 import { maybeConfirmOrderTag } from './confirm-order-tag'
-import { isAddressLikeMessage } from './actions/orders'
+import { isAddressLikeMessage, actionCreateOrder } from './actions/orders'
 import { runSalesAgentToolLoop } from './tool-loop'
 import { SalesAgentRunLogger } from './debug-log'
+import { engineSendText } from '@/lib/flows/meta-send'
+import { fetchCatalogProduct } from '@/lib/catalog/products'
+import {
+  buildColorAskText,
+  extractColorsFromText,
+  extractOrderIntents,
+  loadAlreadySentProductKeys,
+  loadRecentCustomerTexts,
+  parseColorOnlyReply,
+  parseOrderPending,
+  resolveLineItems,
+  shouldRunOrderIntake,
+  type OrderPendingState,
+} from './order-intent'
 
 /**
  * Sales Agent entry — replaces plain AI auto-reply when sales_agent_enabled.
@@ -241,7 +255,171 @@ export async function dispatchSalesAgent(
       }
     }
 
-    // 3) Dedup same question
+    const products = await loadProductQuickReplies(db, accountId)
+    const alreadySent = await loadAlreadySentProductKeys(
+      db,
+      conversationId,
+      products,
+    )
+    const recentCustomerTexts = await loadRecentCustomerTexts(
+      db,
+      conversationId,
+      12,
+    )
+
+    // 2b) Awaiting color for order — customer replies with a color
+    const orderPending = parseOrderPending(gate.conversation.sa_order_pending)
+    if (config.createOrder && orderPending && inboundText) {
+      const colorOnly = parseColorOnlyReply(inboundText)
+      const colorsInMsg = colorOnly
+        ? [colorOnly]
+        : extractColorsFromText(inboundText)
+      if (colorsInMsg.length > 0) {
+        const color = colorsInMsg[0]
+        const intents = orderPending.bags.map((b) => ({
+          productId: b.productId,
+          catalogMessageId: b.catalogMessageId,
+          name: b.name,
+          color,
+          qty: b.qty,
+          quickReplyId: b.quickReplyId,
+        }))
+        const items = await resolveLineItems(intents)
+        log.step('order', `Color "${color}" received — creating order`, {
+          items,
+        })
+        const r = await actionCreateOrder({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          configOwnerUserId,
+          addressText: orderPending.addressText,
+          items,
+          contactPhone,
+          useSinglish,
+        })
+        await clearOrderPending(db, conversationId)
+        log.step('order', r.ok ? r.message : `Create failed: ${r.message}`)
+        if (r.ok) {
+          await rememberAnsweredQuestion(db, conversationId, inboundText)
+          await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
+          await log.complete()
+          return
+        }
+      }
+    }
+
+    // 2c) Address intake → create order (or ask color). Skip re-sending product QRs.
+    if (config.createOrder && inboundText && shouldRunOrderIntake(inboundText)) {
+      const intents = extractOrderIntents(
+        [inboundText, ...recentCustomerTexts],
+        products,
+      )
+      log.step('order', 'Address-like message — resolving bag/color intents', {
+        intents,
+      })
+
+      const missingColor = intents.filter((i) => !i.color)
+      const ready = intents.filter((i) => i.color)
+
+      if (intents.length === 0) {
+        log.step(
+          'order',
+          'Address found but no bag in recent messages — asking which bag',
+        )
+        await engineSendText({
+          accountId,
+          userId: configOwnerUserId,
+          conversationId,
+          contactId,
+          text: useSinglish
+            ? 'Address eka hambuna. Mokakda bag eka / color eka oyata oni?'
+            : 'Got your address. Which bag and color do you want?',
+          aiGenerated: true,
+        })
+        handled = true
+        await rememberAnsweredQuestion(db, conversationId, inboundText)
+        await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
+        await log.complete()
+        return
+      }
+
+      if (missingColor.length > 0 && ready.length === 0) {
+        // All bags missing color — ask, keep address for later
+        let availableColors: string[] = []
+        const first = missingColor[0]
+        if (first.productId) {
+          try {
+            const p = await fetchCatalogProduct(first.productId)
+            availableColors = p?.colors ?? []
+          } catch {
+            /* ignore */
+          }
+        }
+        const pending: OrderPendingState = {
+          type: 'awaiting_color',
+          bags: missingColor.map((b) => ({
+            productId: b.productId,
+            catalogMessageId: b.catalogMessageId,
+            name: b.name,
+            qty: b.qty,
+            quickReplyId: b.quickReplyId,
+          })),
+          addressText: inboundText,
+          askedAt: new Date().toISOString(),
+        }
+        await db
+          .from('conversations')
+          .update({ sa_order_pending: pending })
+          .eq('id', conversationId)
+        const ask = buildColorAskText(missingColor, useSinglish, availableColors)
+        await engineSendText({
+          accountId,
+          userId: configOwnerUserId,
+          conversationId,
+          contactId,
+          text: ask,
+          aiGenerated: true,
+        })
+        log.step('order', 'Asked for color before creating order', { ask })
+        await rememberAnsweredQuestion(db, conversationId, inboundText)
+        await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
+        await log.complete()
+        return
+      }
+
+      // Prefer ready (with color) items; if mix, create for ready and ask for rest later
+      const toCreate = ready.length ? ready : intents
+      if (toCreate.every((i) => i.color)) {
+        const items = await resolveLineItems(toCreate)
+        const r = await actionCreateOrder({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          configOwnerUserId,
+          addressText: inboundText,
+          items,
+          contactPhone,
+          useSinglish,
+        })
+        await clearOrderPending(db, conversationId)
+        log.step(
+          'order',
+          r.ok ? `Order created: ${r.message}` : `Create failed: ${r.message}`,
+          { items },
+        )
+        if (r.ok) {
+          await rememberAnsweredQuestion(db, conversationId, inboundText)
+          await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
+          await log.complete()
+          return
+        }
+      }
+    }
+
+    // 3) Dedup same question (skip when address intake already handled)
     if (
       inboundText &&
       (await shouldSkipDuplicateQuestion(
@@ -303,25 +481,40 @@ export async function dispatchSalesAgent(
       }
     }
 
-    // 5) Product name match → send product QRs
-    if (config.productMatch && inboundText) {
-      const products = await loadProductQuickReplies(db, accountId)
+    // 5) Product name match → send product QRs (skip already sent)
+    if (config.productMatch && inboundText && !isAddressLikeMessage(inboundText)) {
       const hits = matchProductsInText(inboundText, products)
+      const freshHits = hits.filter((h) => {
+        const key = h.catalog_message_id || h.id
+        return !alreadySent.has(key)
+      })
+      const skipped = hits.filter((h) => {
+        const key = h.catalog_message_id || h.id
+        return alreadySent.has(key)
+      })
       log.set({
         product_hits: hits.map((h) => ({
           title: h.title,
           catalog_message_id: h.catalog_message_id,
         })),
       })
+      if (skipped.length) {
+        log.step(
+          'product_match',
+          `Skipped already-sent product QR(s): ${skipped.map((s) => s.title).join(', ')}`,
+        )
+      }
       log.step(
         'product_match',
-        hits.length
-          ? `Matched ${hits.length} product(s)`
-          : 'No product name match',
-        { titles: hits.map((h) => h.title) },
+        freshHits.length
+          ? `Matched ${freshHits.length} new product(s)`
+          : hits.length
+            ? 'Product named but QR already sent — not resending'
+            : 'No product name match',
+        { titles: freshHits.map((h) => h.title) },
       )
-      if (hits.length > 0) {
-        for (const hit of hits.slice(0, 5)) {
+      if (freshHits.length > 0) {
+        for (const hit of freshHits.slice(0, 5)) {
           if (!hit.catalog_message_id) continue
           try {
             await sendQuickReplyByCatalogId({
@@ -342,6 +535,26 @@ export async function dispatchSalesAgent(
             log.step('send_qr', `Product QR failed: ${msg}`, { title: hit.title })
             console.error('[sales-agent] product QR send failed:', err)
           }
+        }
+      } else if (hits.length > 0 && skipped.length > 0) {
+        // Customer asked about a bag we already sent details for — don't resend.
+        // If they also included color (buying intent without address), nudge address format.
+        const intents = extractOrderIntents([inboundText], products)
+        const withColor = intents.filter((i) => i.color)
+        if (withColor.length && config.createOrder) {
+          const ask = useSinglish
+            ? 'Hari — order ekata name, address, district, phone number eka send karanna.'
+            : 'Please send your name, address, district, and phone number to place the order.'
+          await engineSendText({
+            accountId,
+            userId: configOwnerUserId,
+            conversationId,
+            contactId,
+            text: ask,
+            aiGenerated: true,
+          })
+          handled = true
+          log.step('order', 'Bag already sent + color chosen — asked for address')
         }
       }
     }
@@ -432,8 +645,7 @@ export async function dispatchSalesAgent(
         ? [{ role: 'user' as const, content: inboundText }]
         : [{ role: 'user' as const, content: '[customer sent an image]' }]
 
-    const [products, customs] = await Promise.all([
-      loadProductQuickReplies(db, accountId),
+    const [customs] = await Promise.all([
       loadCustomQuickReplies(db, accountId),
     ])
     const availableQuickReplies = [
@@ -560,4 +772,14 @@ async function claimSlot(
     return false
   }
   return claimed === true
+}
+
+async function clearOrderPending(
+  db: ReturnType<typeof supabaseAdmin>,
+  conversationId: string,
+): Promise<void> {
+  await db
+    .from('conversations')
+    .update({ sa_order_pending: null })
+    .eq('id', conversationId)
 }
