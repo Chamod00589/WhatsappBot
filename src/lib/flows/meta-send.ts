@@ -175,7 +175,7 @@ interface SendMediaEngineArgs {
  */
 export async function engineSendMedia(
   args: SendMediaEngineArgs,
-): Promise<{ whatsapp_message_id: string }> {
+): Promise<{ whatsapp_message_id: string; message_id: string | null }> {
   const db = supabaseAdmin()
 
   const { data: contact, error: contactErr } = await db
@@ -243,16 +243,24 @@ export async function engineSendMedia(
   // messages_content_type_check constraint (migration 001 + 010).
   // content_text carries the caption (or empty) so the conversation
   // list preview shows something meaningful when the user glances at it.
+  // Persist media_url on insert (same as inbox /api/whatsapp/send) so the
+  // chat bubble can render the image — a post-hoc "latest message" patch
+  // races with other bot sends and leaves MediaUnavailable.
   const preview = args.caption?.trim() || `[${args.kind}]`
-  const { error: msgErr } = await db.from('messages').insert({
-    conversation_id: args.conversationId,
-    sender_type: 'bot',
-    content_type: args.kind,
-    content_text: args.caption ?? null,
-    message_id: waMessageId,
-    status: 'sent',
-    ai_generated: args.aiGenerated ?? false,
-  })
+  const { data: inserted, error: msgErr } = await db
+    .from('messages')
+    .insert({
+      conversation_id: args.conversationId,
+      sender_type: 'bot',
+      content_type: args.kind,
+      content_text: args.caption ?? null,
+      media_url: args.link,
+      message_id: waMessageId,
+      status: 'sent',
+      ai_generated: args.aiGenerated ?? false,
+    })
+    .select('id')
+    .maybeSingle()
   if (msgErr) {
     throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
   }
@@ -266,7 +274,10 @@ export async function engineSendMedia(
     })
     .eq('id', args.conversationId)
 
-  return { whatsapp_message_id: waMessageId }
+  return {
+    whatsapp_message_id: waMessageId,
+    message_id: typeof inserted?.id === 'string' ? inserted.id : null,
+  }
 }
 
 interface SendInteractiveButtonsEngineArgs {

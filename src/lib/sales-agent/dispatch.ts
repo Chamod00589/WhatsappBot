@@ -59,8 +59,21 @@ import {
 /**
  * Sales Agent entry — replaces plain AI auto-reply when sales_agent_enabled.
  * Never throws (webhook fire-and-forget safety).
+ *
+ * Prefer {@link enqueueSalesAgentDispatch} from the webhook so rapid
+ * customer messages coalesce into one analysis/reply.
  */
 export async function dispatchSalesAgent(
+  args: SalesAgentDispatchArgs,
+): Promise<void> {
+  return dispatchSalesAgentNow(args)
+}
+
+/**
+ * Immediate (no debounce) Sales Agent run. Used by the debounce flusher
+ * and tests that need a single-message dispatch.
+ */
+export async function dispatchSalesAgentNow(
   args: SalesAgentDispatchArgs,
 ): Promise<void> {
   const {
@@ -87,6 +100,7 @@ export async function dispatchSalesAgent(
     text: (rawInbound || '').slice(0, 500),
     hasMedia: Boolean(mediaUrl || metaMediaId),
     metaMediaId: metaMediaId || null,
+    burstLines: (rawInbound || '').split('\n').filter((l) => l.trim()).length,
   })
 
   try {

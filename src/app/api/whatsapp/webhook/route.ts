@@ -7,7 +7,7 @@ import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
-import { dispatchSalesAgent } from '@/lib/sales-agent'
+import { enqueueSalesAgentDispatch } from '@/lib/sales-agent'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import {
   handleTemplateWebhookChange,
@@ -804,7 +804,7 @@ async function processMessage(
     !interactiveReplyId &&
     (inboundText.trim() || contentType === 'image')
   ) {
-    await dispatchSalesAgent({
+    await enqueueSalesAgentDispatch({
       accountId,
       conversationId: conversation.id,
       contactId: contactRecord.id,

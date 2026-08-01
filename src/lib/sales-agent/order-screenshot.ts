@@ -99,27 +99,29 @@ export async function renderOrderCardPng(order: OrderLike): Promise<Buffer> {
     `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="14" font-weight="700" fill="#e9edef">${esc(fullName)}</text>`,
     20,
   )
-  addressLines.forEach((line, i) => {
+  // No emoji in SVG text — Sharp/librsvg often fails to rasterize them,
+  // which made Meta send fail and fell back to text-only confirm.
+  addressLines.forEach((line) => {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(i === 0 ? `📍 ${line}` : line)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(line)}</text>`,
       18,
     )
   })
   if (mobile1) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(`📞 ${mobile1}`)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(mobile1)}</text>`,
       18,
     )
   }
   if (mobile2) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(`📞 ${mobile2}`)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(mobile2)}</text>`,
       18,
     )
   }
   if (city) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(`🏙 ${city}`)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(city)}</text>`,
       22,
     )
   }
@@ -243,7 +245,7 @@ export async function sendOrderConfirmScreenshot(args: {
     catalogBaseUrl(),
   )
 
-  await engineSendMedia({
+  const sent = await engineSendMedia({
     accountId,
     userId: configOwnerUserId,
     conversationId,
@@ -254,23 +256,10 @@ export async function sendOrderConfirmScreenshot(args: {
     aiGenerated: true,
   })
 
-  // Stamp compact AI context on the latest outbound media message
-  const { data } = await db
-    .from('messages')
-    .select('id')
-    .eq('conversation_id', conversationId)
-    .in('sender_type', ['agent', 'bot'])
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (data?.id) {
+  if (sent.message_id) {
     await db
       .from('messages')
-      .update({
-        media_url: publicUrl,
-        ai_context_summary: CONTEXT_BLURBS.orderConfirm,
-        ai_generated: true,
-      })
-      .eq('id', data.id)
+      .update({ ai_context_summary: CONTEXT_BLURBS.orderConfirm })
+      .eq('id', sent.message_id)
   }
 }
