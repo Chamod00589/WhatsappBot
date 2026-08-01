@@ -14,6 +14,7 @@ import { buildSalesAgentContext } from './context'
 import {
   askBagAddressText,
   askWhichBagText,
+  askColorAndQtyText,
   detectReplyMode,
 } from './language'
 import {
@@ -49,14 +50,16 @@ import { SalesAgentRunLogger } from './debug-log'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { fetchCatalogProduct } from '@/lib/catalog/products'
 import {
-  buildColorAskText,
   extractColorsFromText,
   extractOrderIntents,
+  extractQty,
   loadAlreadySentProductKeys,
   loadRecentCustomerTexts,
+  loadRecentlyOfferedProducts,
   parseColorOnlyReply,
   parseOrderPending,
   resolveLineItems,
+  resolveOrderIntentsForAddress,
   shouldRunOrderIntake,
   type OrderPendingState,
 } from './order-intent'
@@ -304,7 +307,7 @@ export async function dispatchSalesAgentNow(
     const recentCustomerTexts = await loadRecentCustomerTexts(
       db,
       conversationId,
-      12,
+      20,
     )
 
     // 2c) Price / quotation request (bag names and/or images) → QuotationCard PNG
@@ -353,21 +356,120 @@ export async function dispatchSalesAgentNow(
       }
     }
 
-    // 2b) Awaiting color for order — customer replies with a color
+    // 2b) Awaiting bag/color for a saved address — customer replies with details
     const orderPending = parseOrderPending(gate.conversation.sa_order_pending)
     if (config.createOrder && orderPending && inboundText) {
+      const qtyFromReply = extractQty(inboundText)
+
+      // Address saved earlier with no bag yet — customer now names bag (+ color)
+      if (!orderPending.bags.length) {
+        const intents = extractOrderIntents([inboundText], products)
+        const ready = intents.filter((i) => i.color)
+        if (ready.length) {
+          const items = await resolveLineItems(
+            ready.map((i) => ({
+              ...i,
+              qty: qtyFromReply > 1 ? qtyFromReply : i.qty,
+            })),
+          )
+          log.step('order', 'Pending address + bag/color reply — creating order', {
+            items,
+          })
+          const r = await actionCreateOrder({
+            db,
+            accountId,
+            conversationId,
+            contactId,
+            configOwnerUserId,
+            addressText: orderPending.addressText,
+            items,
+            contactPhone,
+            useSinglish,
+          })
+          await clearOrderPending(db, conversationId)
+          log.step('order', r.ok ? r.message : `Create failed: ${r.message}`)
+          if (r.ok) {
+            await rememberAnsweredQuestion(db, conversationId, inboundText)
+            await claimSlot(
+              db,
+              conversationId,
+              config.autoReplyMaxPerConversation,
+            )
+            await log.complete()
+            return
+          }
+        } else if (intents.length && !intents.some((i) => i.color)) {
+          // Got bag name but not color — update pending bags and ask color
+          const pending: OrderPendingState = {
+            type: 'awaiting_color',
+            bags: intents.map((b) => ({
+              productId: b.productId,
+              catalogMessageId: b.catalogMessageId,
+              name: b.name,
+              qty: qtyFromReply > 1 ? qtyFromReply : b.qty,
+              quickReplyId: b.quickReplyId,
+            })),
+            addressText: orderPending.addressText,
+            askedAt: new Date().toISOString(),
+          }
+          await db
+            .from('conversations')
+            .update({ sa_order_pending: pending })
+            .eq('id', conversationId)
+          for (const bag of intents.slice(0, 3)) {
+            if (!bag.catalogMessageId) continue
+            try {
+              await sendQuickReplyByCatalogId({
+                db,
+                accountId,
+                conversationId,
+                catalogMessageId: bag.catalogMessageId,
+                contextSummary: `Sent product QR while awaiting color/qty: ${bag.name}`,
+              })
+            } catch {
+              /* ignore */
+            }
+          }
+          let availableColors: string[] = []
+          if (intents[0]?.productId) {
+            try {
+              const p = await fetchCatalogProduct(intents[0].productId)
+              availableColors = p?.colors ?? []
+            } catch {
+              /* ignore */
+            }
+          }
+          await engineSendText({
+            accountId,
+            userId: configOwnerUserId,
+            conversationId,
+            contactId,
+            text: askColorAndQtyText(
+              replyMode,
+              intents.map((b) => b.name).join(', '),
+              availableColors,
+            ),
+            aiGenerated: true,
+          })
+          await rememberAnsweredQuestion(db, conversationId, inboundText)
+          await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
+          await log.complete()
+          return
+        }
+      }
+
       const colorOnly = parseColorOnlyReply(inboundText)
       const colorsInMsg = colorOnly
         ? [colorOnly]
         : extractColorsFromText(inboundText)
-      if (colorsInMsg.length > 0) {
+      if (colorsInMsg.length > 0 && orderPending.bags.length > 0) {
         const color = colorsInMsg[0]
         const intents = orderPending.bags.map((b) => ({
           productId: b.productId,
           catalogMessageId: b.catalogMessageId,
           name: b.name,
           color,
-          qty: b.qty,
+          qty: qtyFromReply > 1 ? qtyFromReply : b.qty,
           quickReplyId: b.quickReplyId,
         }))
         const items = await resolveLineItems(intents)
@@ -396,14 +498,21 @@ export async function dispatchSalesAgentNow(
       }
     }
 
-    // 2c) Address intake → create order (or ask color). Skip re-sending product QRs.
+    // 2d) Address intake → create order when bag+color known; else ask via QR
     if (config.createOrder && inboundText && shouldRunOrderIntake(inboundText)) {
-      const intents = extractOrderIntents(
-        [inboundText, ...recentCustomerTexts],
+      const offered = await loadRecentlyOfferedProducts(
+        db,
+        conversationId,
         products,
       )
+      const intents = resolveOrderIntentsForAddress({
+        customerTexts: [inboundText, ...recentCustomerTexts],
+        catalog: products,
+        offeredProducts: offered,
+      })
       log.step('order', 'Address-like message — resolving bag/color intents', {
         intents,
+        offered: offered.map((o) => o.title),
       })
 
       const missingColor = intents.filter((i) => !i.color)
@@ -412,8 +521,27 @@ export async function dispatchSalesAgentNow(
       if (intents.length === 0) {
         log.step(
           'order',
-          'Address found but no bag in recent messages — asking which bag',
+          'Address found but no bag — ask product + qty (resend offered QRs)',
         )
+        const toOffer = offered.slice(0, 3)
+        if (toOffer.length && config.productMatch) {
+          for (const hit of toOffer) {
+            if (!hit.catalog_message_id) continue
+            try {
+              await sendQuickReplyByCatalogId({
+                db,
+                accountId,
+                conversationId,
+                catalogMessageId: hit.catalog_message_id,
+                contextSummary:
+                  hit.description?.trim() ||
+                  `Resent product QR for order: ${hit.title}`,
+              })
+            } catch (err) {
+              console.error('[sales-agent] order ask product QR failed:', err)
+            }
+          }
+        }
         await engineSendText({
           accountId,
           userId: configOwnerUserId,
@@ -422,6 +550,17 @@ export async function dispatchSalesAgentNow(
           text: askWhichBagText(replyMode),
           aiGenerated: true,
         })
+        await db
+          .from('conversations')
+          .update({
+            sa_order_pending: {
+              type: 'awaiting_color',
+              bags: [],
+              addressText: inboundText,
+              askedAt: new Date().toISOString(),
+            } satisfies OrderPendingState,
+          })
+          .eq('id', conversationId)
         handled = true
         await rememberAnsweredQuestion(db, conversationId, inboundText)
         await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
@@ -430,7 +569,6 @@ export async function dispatchSalesAgentNow(
       }
 
       if (missingColor.length > 0 && ready.length === 0) {
-        // All bags missing color — ask, keep address for later
         let availableColors: string[] = []
         const first = missingColor[0]
         if (first.productId) {
@@ -457,7 +595,27 @@ export async function dispatchSalesAgentNow(
           .from('conversations')
           .update({ sa_order_pending: pending })
           .eq('id', conversationId)
-        const ask = buildColorAskText(missingColor, useSinglish, availableColors)
+
+        for (const bag of missingColor.slice(0, 3)) {
+          if (!bag.catalogMessageId) continue
+          try {
+            await sendQuickReplyByCatalogId({
+              db,
+              accountId,
+              conversationId,
+              catalogMessageId: bag.catalogMessageId,
+              contextSummary: `Sent product QR while awaiting color/qty for order: ${bag.name}`,
+            })
+          } catch (err) {
+            console.error('[sales-agent] color-ask product QR failed:', err)
+          }
+        }
+
+        const ask = askColorAndQtyText(
+          replyMode,
+          missingColor.map((b) => b.name).join(', '),
+          availableColors,
+        )
         await engineSendText({
           accountId,
           userId: configOwnerUserId,
@@ -466,14 +624,13 @@ export async function dispatchSalesAgentNow(
           text: ask,
           aiGenerated: true,
         })
-        log.step('order', 'Asked for color before creating order', { ask })
+        log.step('order', 'Asked for color + qty before creating order', { ask })
         await rememberAnsweredQuestion(db, conversationId, inboundText)
         await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
         await log.complete()
         return
       }
 
-      // Prefer ready (with color) items; if mix, create for ready and ask for rest later
       const toCreate = ready.length ? ready : intents
       if (toCreate.every((i) => i.color)) {
         const items = await resolveLineItems(toCreate)

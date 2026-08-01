@@ -175,7 +175,7 @@ export async function renderQuotationCardPng(
     throw new Error('Quotation card render produced empty image')
   }
 
-  const composites: sharp.OverlayOptions[] = []
+  const composites: Array<{ input: Buffer; left: number; top: number }> = []
   for (const slot of thumbSlots) {
     const thumb = await loadThumbBuffer(items[slot.index]?.image)
     if (!thumb) continue

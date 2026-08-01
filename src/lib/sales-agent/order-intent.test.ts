@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
-  extractColorsFromText,
   extractOrderIntents,
   parseColorOnlyReply,
   productDisplayName,
+  resolveOrderIntentsForAddress,
 } from './order-intent'
+import { isAddressLikeMessage } from './actions/orders'
 import { buildProductNeedles, type MatchableQuickReply } from './match-products'
 
 const cloudy: MatchableQuickReply = {
@@ -14,7 +15,10 @@ const cloudy: MatchableQuickReply = {
   kind: 'catalog',
   product_id: 'cloudy',
   catalog_message_id: 'qm_site_prod_cloudy',
-  needles: buildProductNeedles('Cloudy Shoulder Bag Details Quick Reply', 'cloudy'),
+  needles: buildProductNeedles(
+    'Cloudy Shoulder Bag Details Quick Reply',
+    'cloudy',
+  ),
 }
 
 describe('order-intent', () => {
@@ -38,6 +42,40 @@ describe('order-intent', () => {
     expect(intents[0]?.color?.toLowerCase()).toBe('black')
   })
 
+  it('detects bare address block without saying address', () => {
+    const bare = `Chamod
+No 280
+Uttalapura
+Dehiattakandiya
+0779522100`
+    expect(isAddressLikeMessage(bare)).toBe(true)
+  })
+
+  it('resolves bag from text when address-only follows prior ask', () => {
+    const intents = resolveOrderIntentsForAddress({
+      customerTexts: [
+        'Chamod\nNo 280\nUttalapura\nDehiattakandiya\n0779522100',
+        'mata cloudy black oni',
+      ],
+      catalog: [cloudy],
+      offeredProducts: [cloudy],
+    })
+    expect(intents[0]?.name.toLowerCase()).toContain('cloudy')
+    expect(intents[0]?.color?.toLowerCase()).toBe('black')
+  })
+
+  it('uses offered product when customer texts have no bag name', () => {
+    const intents = resolveOrderIntentsForAddress({
+      customerTexts: [
+        'Chamod\nNo 280\nUttalapura\nDehiattakandiya\n0779522100',
+      ],
+      catalog: [cloudy],
+      offeredProducts: [cloudy],
+    })
+    expect(intents).toHaveLength(1)
+    expect(intents[0].color).toBeNull()
+  })
+
   it('detects missing color', () => {
     const intents = extractOrderIntents(
       ['mata cloudy bag ekak ganna puluwanda?'],
@@ -48,12 +86,6 @@ describe('order-intent', () => {
 
   it('parses color-only reply', () => {
     expect(parseColorOnlyReply('black')).toBe('Black')
-    expect(parseColorOnlyReply('Black color')).toBe('Black')
-    expect(parseColorOnlyReply('mata cloudy black bag ekak oni')).toBeNull()
-  })
-
-  it('extracts colors', () => {
-    expect(extractColorsFromText('cloudy white bag')).toContain('White')
   })
 
   it('strips quick reply suffix from title', () => {

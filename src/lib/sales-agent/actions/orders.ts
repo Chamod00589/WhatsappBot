@@ -24,7 +24,10 @@ import {
 import { formatOrderLabelBarcode } from '@/lib/orders/constants'
 import { catalogBaseUrl } from '@/lib/catalog/products'
 import { sendOrderConfirmScreenshot } from '../order-screenshot'
-import { sendQuotationScreenshot } from '../quotation-screenshot'
+import {
+  enrichQuotationLineItems,
+  sendQuotationScreenshot,
+} from '../quotation-screenshot'
 import { addNamedTag } from '../tags'
 import { CONTEXT_BLURBS } from '../types'
 
@@ -303,6 +306,8 @@ export async function actionSendQuotation(args: {
     ? 'Order karanna oni nam name, address, phone number eka send karanna.'
     : 'Order pannanum na name, address, phone number anupunga.'
 
+  const enriched = await enrichQuotationLineItems(db, accountId, items)
+
   try {
     await sendQuotationScreenshot({
       db,
@@ -310,7 +315,7 @@ export async function actionSendQuotation(args: {
       conversationId,
       contactId,
       configOwnerUserId,
-      items,
+      items: enriched,
       caption,
     })
     return { ok: true, message: 'Quotation screenshot sent' }
@@ -319,7 +324,7 @@ export async function actionSendQuotation(args: {
     // Fallback: text quotation (same numbers)
     const lines: string[] = ['*Price Quotation*', '']
     let sub = 0
-    for (const it of items) {
+    for (const it of enriched) {
       const line = Number(it.price) * Number(it.qty)
       sub += line
       const color = it.color ? ` (${it.color})` : ''
@@ -379,19 +384,43 @@ export async function actionMarkHuman(args: {
 
 /** Heuristic: message looks like shipping / contact details. */
 export function isAddressLikeMessage(text: string): boolean {
-  let score = 0
-  if (/📌|name\s*:|address\s*:|district\s*:|contact\s*0?\d/i.test(text)) {
-    score += 5
-  }
-  if (/\b0\d{9}\b|\+94\s?\d{9}/.test(text.replace(/[\s-]/g, ''))) score += 3
-  if (
-    /road|lane|street|avenue|junction|pura|watta|gama|city|district/i.test(
-      text,
+  const t = text.trim()
+  if (!t) return false
+
+  const compact = t.replace(/[\s-]/g, '')
+  const hasPhone = /\b0\d{9}\b|\+94\d{9}/.test(compact)
+  const lines = t
+    .split(/\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const lineCount = lines.length
+  const hasHouseNo =
+    /\bno\.?\s*\d{1,4}\b|\b\d{1,4}\s*\/\s*\d{0,3}\b|#\s*\d{1,4}\b/i.test(t)
+  const hasPlace =
+    /road|lane|street|avenue|junction|pura|watta|gama|city|district|kandiya|mawatha|mw\b|para\b|town|village/i.test(
+      t,
     )
-  ) {
-    score += 2
-  }
-  if ((text.match(/\n/g) || []).length >= 1) score += 1
-  if (text.length >= 40) score += 1
+  const hasLabel =
+    /📌|name\s*:|address\s*:|district\s*:|contact\s*0?\d|delivery\s*(address|details)?/i.test(
+      t,
+    )
+
+  // Explicit labeled shipping form
+  if (hasLabel && (hasPhone || lineCount >= 2)) return true
+
+  // Bare block like:
+  // Chamod / No 280 / Uttalapura / Dehiattakandiya / 0779522100
+  // (no need to say "this is my address")
+  if (hasPhone && lineCount >= 3) return true
+  if (hasPhone && lineCount >= 2 && (hasPlace || hasHouseNo)) return true
+
+  let score = 0
+  if (hasLabel) score += 5
+  if (hasPhone) score += 3
+  if (hasPlace) score += 2
+  if (hasHouseNo) score += 1
+  if (lineCount >= 2) score += 2
+  if (lineCount >= 4) score += 1
+  if (t.length >= 40) score += 1
   return score >= 5
 }

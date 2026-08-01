@@ -83,9 +83,24 @@ export function askBagAddressText(mode: ReplyMode): string {
 
 export function askWhichBagText(mode: ReplyMode): string {
   if (mode === 'tanglish') {
-    return 'Address kitten. Ungalukku ethu bag / color venum?'
+    return 'Address kitten. Ungalukku ethu bag / color / qty venum? Bag name kooda anupunga.'
   }
-  return 'Address eka hambuna. Mokakda bag eka / color eka oyata oni?'
+  return 'Address eka hambuna. Mokakda bag eka, color eka, saha qty oyata oni? Bag name eka kiyanna.'
+}
+
+export function askColorAndQtyText(
+  mode: ReplyMode,
+  bagNames: string,
+  availableColors?: string[],
+): string {
+  const colorHint =
+    availableColors && availableColors.length
+      ? availableColors.slice(0, 8).join(' / ')
+      : 'black / white / pink…'
+  if (mode === 'tanglish') {
+    return `${bagNames} ku ethu color + qty venum? (${colorHint})`
+  }
+  return `${bagNames} eka ganna color eka saha qty kiyanna. (${colorHint})`
 }
 
 export function orderConfirmedText(mode: ReplyMode): string {

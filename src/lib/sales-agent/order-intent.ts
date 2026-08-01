@@ -291,6 +291,85 @@ export async function loadRecentCustomerTexts(
     .filter(Boolean)
 }
 
+/**
+ * Products we already offered (sent QR) in this chat — used when the
+ * customer later pastes only an address without repeating the bag name.
+ */
+export async function loadRecentlyOfferedProducts(
+  db: SupabaseClient,
+  conversationId: string,
+  catalog: MatchableQuickReply[],
+  limit = 40,
+): Promise<MatchableQuickReply[]> {
+  const { data } = await db
+    .from('messages')
+    .select('content_text, ai_context_summary')
+    .eq('conversation_id', conversationId)
+    .in('sender_type', ['agent', 'bot'])
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  const blob = ((data ?? []) as Array<{
+    content_text: string | null
+    ai_context_summary: string | null
+  }>)
+    .map((m) => `${m.content_text || ''}\n${m.ai_context_summary || ''}`)
+    .join('\n')
+    .toLowerCase()
+
+  const offered: MatchableQuickReply[] = []
+  const seen = new Set<string>()
+  for (const p of catalog) {
+    const key = p.catalog_message_id || p.id
+    if (seen.has(key)) continue
+    const title = productDisplayName(p.title).toLowerCase()
+    const stub = (p.title || '').toLowerCase()
+    const catalogId = (p.catalog_message_id || '').toLowerCase()
+    const hit =
+      (catalogId && blob.includes(catalogId)) ||
+      (title &&
+        title.length >= 4 &&
+        (blob.includes(`sent product quick reply: ${title}`) ||
+          blob.includes(`sent product quick reply for ${title}`) ||
+          blob.includes(stub) ||
+          blob.includes(title)))
+    if (hit) {
+      seen.add(key)
+      offered.push(p)
+    }
+  }
+  return offered
+}
+
+/**
+ * Resolve bag/color/qty for an address message from recent customer text
+ * and/or products we already sent as QRs.
+ */
+export function resolveOrderIntentsForAddress(args: {
+  customerTexts: string[]
+  catalog: MatchableQuickReply[]
+  offeredProducts: MatchableQuickReply[]
+}): BagOrderIntent[] {
+  const { customerTexts, catalog, offeredProducts } = args
+  const fromText = extractOrderIntents(customerTexts, catalog)
+  if (fromText.length) return fromText
+
+  if (!offeredProducts.length) return []
+
+  const merged = customerTexts.filter(Boolean).join('\n')
+  const colors = extractColorsFromText(merged)
+  const qty = extractQty(merged)
+
+  return offeredProducts.map((p, i) => ({
+    productId: p.product_id,
+    catalogMessageId: p.catalog_message_id,
+    name: productDisplayName(p.title),
+    color: colors[i] || (colors.length === 1 ? colors[0] : null),
+    qty,
+    quickReplyId: p.id,
+  }))
+}
+
 export function buildColorAskText(
   bags: Array<{ name: string }>,
   useSinglish: boolean,
@@ -302,9 +381,9 @@ export function buildColorAskText(
       ? availableColors.slice(0, 8).join(' / ')
       : 'black / white / pink…'
   if (useSinglish) {
-    return `${names} eka ganna color eka mokakda? (${colorHint})`
+    return `${names} eka ganna color eka saha qty kiyanna. (${colorHint})`
   }
-  return `${names} ku ethu color venum? (${colorHint})`
+  return `${names} ku ethu color + qty venum? (${colorHint})`
 }
 
 export function shouldRunOrderIntake(inboundText: string): boolean {
