@@ -29,7 +29,7 @@ import {
   sendLocalTextQuickReply,
 } from './send-quick-reply'
 import {
-  handleInboundIdentify,
+  handleInboundIdentifyMany,
   parseIdentifyPending,
   resolveIdentifyConfirm,
 } from './identify'
@@ -520,37 +520,42 @@ export async function dispatchSalesAgentNow(
       return
     }
 
-    // 4) Image identify
-    if (
-      config.identify &&
-      contentType === 'image' &&
-      (mediaUrl || metaMediaId)
-    ) {
-      log.step('identify', 'Running bag identify on inbound image')
-      const r = await handleInboundIdentify({
+    // 4) Image identify — all images in the burst (not only the last one)
+    if (config.identify && inboundImages.length > 0) {
+      log.step(
+        'identify',
+        `Running bag identify on ${inboundImages.length} inbound image(s)`,
+      )
+      const r = await handleInboundIdentifyMany({
         db,
         accountId,
         conversationId,
         contactId,
         configOwnerUserId,
-        mediaUrl,
-        metaMediaId,
+        images: inboundImages,
         useSinglish,
       })
       log.set({
         identify: {
           handled: r.handled,
           sentQr: r.sentQr,
+          qrCount: r.qrCount,
+          identified: r.identified,
         },
       })
       log.step(
         'identify',
         r.handled
           ? r.sentQr
-            ? 'Identify ≥90% — sent product QR'
+            ? `Identify ≥90% — sent ${r.qrCount} product QR(s)`
             : 'Identify <90% — asked customer to confirm'
           : 'Identify produced no actionable match',
-        { handled: r.handled, sentQr: r.sentQr },
+        {
+          handled: r.handled,
+          sentQr: r.sentQr,
+          qrCount: r.qrCount,
+          identified: r.identified,
+        },
       )
       if (r.handled) {
         handled = true

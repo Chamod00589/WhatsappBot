@@ -179,24 +179,40 @@ async function mergeBurstArgs(
       ? texts.join('\n')
       : bufferTexts.join('\n') || buf.base.inboundText
 
-  // Collect ALL images in the burst (multi-image quotation / identify).
+  // Collect ALL images in the burst (multi-image identify / quotation).
   const inboundImages: Array<{
     mediaUrl?: string | null
     metaMediaId?: string | null
   }> = []
   const seen = new Set<string>()
-  for (const p of buf.parts) {
-    if (!(p.contentType === 'image' || p.metaMediaId || p.mediaUrl)) continue
-    const key = `${p.metaMediaId || ''}|${p.mediaUrl || ''}`
-    if (!key.replace('|', '') || seen.has(key)) continue
+  const pushImage = (mediaUrl?: string | null, metaMediaId?: string | null) => {
+    const extractedId =
+      metaMediaId ||
+      mediaUrl?.match(/\/api\/whatsapp\/media\/([^/?#]+)/)?.[1] ||
+      null
+    const key = `${extractedId || ''}|${mediaUrl || ''}`
+    if (!key.replace('|', '') || seen.has(key)) return
     seen.add(key)
     inboundImages.push({
-      mediaUrl: p.mediaUrl ?? null,
-      metaMediaId: p.metaMediaId ?? null,
+      mediaUrl: mediaUrl ?? null,
+      metaMediaId: extractedId,
     })
   }
 
-  // Latest image kept for backward-compat identify path
+  for (const p of buf.parts) {
+    if (!(p.contentType === 'image' || p.metaMediaId || p.mediaUrl)) continue
+    pushImage(p.mediaUrl, p.metaMediaId)
+  }
+
+  // Also pull customer images persisted since last bot reply (covers
+  // concurrent webhooks / lost in-memory parts).
+  for (const r of rows ?? []) {
+    if (r.content_type !== 'image') continue
+    const url = typeof r.media_url === 'string' ? r.media_url : null
+    if (!url) continue
+    pushImage(url, null)
+  }
+
   let mediaUrl = buf.base.mediaUrl ?? null
   let metaMediaId = buf.base.metaMediaId ?? null
   let contentType = buf.base.contentType

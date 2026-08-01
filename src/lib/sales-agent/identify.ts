@@ -115,54 +115,137 @@ export async function handleInboundIdentify(args: {
   metaMediaId?: string | null
   useSinglish: boolean
 }): Promise<{ handled: boolean; sentQr: boolean }> {
+  const r = await handleInboundIdentifyMany({
+    ...args,
+    images: [{ mediaUrl: args.mediaUrl, metaMediaId: args.metaMediaId }],
+  })
+  return { handled: r.handled, sentQr: r.sentQr }
+}
+
+/**
+ * Identify every image in a burst and send product QRs for each distinct
+ * high-confidence match (serialized via QR send queue).
+ */
+export async function handleInboundIdentifyMany(args: {
+  db: SupabaseClient
+  accountId: string
+  conversationId: string
+  contactId: string
+  configOwnerUserId: string
+  images: Array<{ mediaUrl?: string | null; metaMediaId?: string | null }>
+  useSinglish: boolean
+}): Promise<{
+  handled: boolean
+  sentQr: boolean
+  qrCount: number
+  identified: Array<{ product: string; color: string; confidence: number }>
+}> {
   const {
     db,
     accountId,
     conversationId,
     contactId,
     configOwnerUserId,
-    mediaUrl,
-    metaMediaId,
     useSinglish,
   } = args
 
-  let matches: BagMatch[]
-  try {
-    matches = await identifyInboundImage({
-      db,
-      accountId,
-      mediaUrl,
-      metaMediaId,
-    })
-  } catch (err) {
-    console.error('[sales-agent] identify failed:', err)
-    return { handled: false, sentQr: false }
+  const images = args.images.filter((i) => i.metaMediaId || i.mediaUrl)
+  if (!images.length) {
+    return { handled: false, sentQr: false, qrCount: 0, identified: [] }
   }
 
-  const best = matches[0]
-  if (!best) return { handled: false, sentQr: false }
-
   const catalog = await loadProductQuickReplies(db, accountId)
-  const qr = matchProductByIdentifyName(best.product, catalog)
+  const identified: Array<{
+    product: string
+    color: string
+    confidence: number
+  }> = []
+  const sentCatalogIds = new Set<string>()
+  let qrCount = 0
+  const needsConfirm: Array<{
+    product: string
+    color: string
+    confidence: number
+    catalogMessageId: string | null
+    quickReplyId: string | null
+  }> = []
 
-  if (best.confidence >= IDENTIFY_CONFIDENCE_THRESHOLD && qr?.catalog_message_id) {
-    await sendQuickReplyByCatalogId({
-      db,
-      accountId,
-      conversationId,
-      catalogMessageId: qr.catalog_message_id,
-      contextSummary: `Sent product quick reply for ${best.product} (${best.color}) after image identify ${best.confidence.toFixed(0)}%`,
+  for (const img of images) {
+    let matches: BagMatch[]
+    try {
+      matches = await identifyInboundImage({
+        db,
+        accountId,
+        mediaUrl: img.mediaUrl,
+        metaMediaId: img.metaMediaId,
+      })
+    } catch (err) {
+      console.error('[sales-agent] identify failed for one image:', err)
+      continue
+    }
+
+    const best = matches[0]
+    if (!best) continue
+
+    identified.push({
+      product: best.product,
+      color: best.color,
+      confidence: best.confidence,
     })
+
+    const qr = matchProductByIdentifyName(best.product, catalog)
+
+    if (
+      best.confidence >= IDENTIFY_CONFIDENCE_THRESHOLD &&
+      qr?.catalog_message_id
+    ) {
+      if (sentCatalogIds.has(qr.catalog_message_id)) continue
+      sentCatalogIds.add(qr.catalog_message_id)
+      try {
+        await sendQuickReplyByCatalogId({
+          db,
+          accountId,
+          conversationId,
+          catalogMessageId: qr.catalog_message_id,
+          contextSummary: `Sent product quick reply for ${best.product} (${best.color}) after image identify ${best.confidence.toFixed(0)}%`,
+        })
+        qrCount += 1
+      } catch (err) {
+        console.error('[sales-agent] identify QR send failed:', err)
+      }
+      continue
+    }
+
+    needsConfirm.push({
+      product: best.product,
+      color: best.color,
+      confidence: best.confidence,
+      catalogMessageId: qr?.catalog_message_id ?? null,
+      quickReplyId: qr?.id ?? null,
+    })
+  }
+
+  if (qrCount > 0) {
     await clearIdentifyPending(db, conversationId)
-    return { handled: true, sentQr: true }
+    return { handled: true, sentQr: true, qrCount, identified }
+  }
+
+  // No high-confidence QR — ask confirm for the strongest single match
+  // (same UX as single-image identify when multi-image also failed threshold).
+  const bestLow = needsConfirm.sort((a, b) => b.confidence - a.confidence)[0]
+  if (!bestLow && !identified.length) {
+    return { handled: false, sentQr: false, qrCount: 0, identified }
+  }
+  if (!bestLow) {
+    return { handled: false, sentQr: false, qrCount: 0, identified }
   }
 
   const pending: IdentifyPendingState = {
-    product: best.product,
-    color: best.color,
-    confidence: best.confidence,
-    catalogMessageId: qr?.catalog_message_id ?? null,
-    quickReplyId: qr?.id ?? null,
+    product: bestLow.product,
+    color: bestLow.color,
+    confidence: bestLow.confidence,
+    catalogMessageId: bestLow.catalogMessageId,
+    quickReplyId: bestLow.quickReplyId,
     askedAt: new Date().toISOString(),
   }
   await db
@@ -171,17 +254,16 @@ export async function handleInboundIdentify(args: {
     .eq('id', conversationId)
 
   const ask = identifyConfirmAskText(
-    best.product,
-    best.color,
-    best.confidence,
+    bestLow.product,
+    bestLow.color,
+    bestLow.confidence,
     useSinglish,
   )
 
-  // Send only the top matching product image + ask (not full QR yet)
   let imageSent = false
-  if (qr?.catalog_message_id) {
+  if (bestLow.catalogMessageId) {
     try {
-      const msg = await fetchCatalogQuickMessage(qr.catalog_message_id)
+      const msg = await fetchCatalogQuickMessage(bestLow.catalogMessageId)
       const imageUrl = msg?.imageUrls?.[0]
       if (imageUrl) {
         await engineSendMedia({
@@ -192,6 +274,7 @@ export async function handleInboundIdentify(args: {
           kind: 'image',
           link: imageUrl,
           caption: ask.slice(0, 1024),
+          aiGenerated: true,
         })
         imageSent = true
         await stampLatestOutboundSummary(
@@ -221,7 +304,7 @@ export async function handleInboundIdentify(args: {
     )
   }
 
-  return { handled: true, sentQr: false }
+  return { handled: true, sentQr: false, qrCount: 0, identified }
 }
 
 export async function resolveIdentifyConfirm(args: {

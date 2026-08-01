@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Bug,
+  Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   Loader2,
   RefreshCw,
   X,
@@ -189,6 +191,12 @@ export function SalesAgentDebugPanel({
 
                     {isOpen ? (
                       <div className="space-y-3 border-t border-border px-2.5 py-2">
+                        {run.inbound_text ? (
+                          <Section title="Inbound">
+                            <CopyableBlock text={run.inbound_text} />
+                          </Section>
+                        ) : null}
+
                         {run.payload.use_singlish != null ? (
                           <Meta
                             label="Language"
@@ -202,9 +210,13 @@ export function SalesAgentDebugPanel({
 
                         {run.payload.capabilities ? (
                           <Section title="Capabilities">
-                            <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-muted/60 p-2 font-mono text-[10px] leading-relaxed">
-                              {JSON.stringify(run.payload.capabilities, null, 2)}
-                            </pre>
+                            <CopyableBlock
+                              text={JSON.stringify(
+                                run.payload.capabilities,
+                                null,
+                                2,
+                              )}
+                            />
                           </Section>
                         ) : null}
 
@@ -212,16 +224,11 @@ export function SalesAgentDebugPanel({
                           <Section title="AI context passed (compact)">
                             <ul className="space-y-1">
                               {run.payload.ai_context.map((m, i) => (
-                                <li
-                                  key={i}
-                                  className="rounded bg-muted/60 px-2 py-1 font-mono text-[10px]"
-                                >
-                                  <span className="font-semibold uppercase text-muted-foreground">
-                                    {m.role}
-                                  </span>
-                                  <span className="ml-2 whitespace-pre-wrap wrap-break-word">
-                                    {m.content}
-                                  </span>
+                                <li key={i}>
+                                  <CopyableBlock
+                                    label={m.role}
+                                    text={m.content}
+                                  />
                                 </li>
                               ))}
                             </ul>
@@ -230,16 +237,14 @@ export function SalesAgentDebugPanel({
 
                         {run.payload.product_hits?.length ? (
                           <Section title="Product matches">
-                            <ul className="list-inside list-disc">
-                              {run.payload.product_hits.map((h, i) => (
-                                <li key={i}>
-                                  {h.title}
-                                  {h.catalog_message_id
-                                    ? ` (${h.catalog_message_id})`
-                                    : ''}
-                                </li>
-                              ))}
-                            </ul>
+                            <CopyableBlock
+                              text={run.payload.product_hits
+                                .map(
+                                  (h) =>
+                                    `${h.title}${h.catalog_message_id ? ` (${h.catalog_message_id})` : ''}`,
+                                )
+                                .join('\n')}
+                            />
                           </Section>
                         ) : null}
 
@@ -253,29 +258,29 @@ export function SalesAgentDebugPanel({
                         {run.payload.tools?.length ? (
                           <Section title="Tool calls">
                             <ul className="space-y-1">
-                              {run.payload.tools.map((t, i) => (
-                                <li
-                                  key={i}
-                                  className="rounded bg-muted/60 px-2 py-1 font-mono text-[10px]"
-                                >
-                                  <div className="font-semibold">{t.name}</div>
-                                  <div className="text-muted-foreground">
-                                    args: {safeJson(t.arguments)}
-                                  </div>
-                                  {t.result ? (
-                                    <div>result: {t.result}</div>
-                                  ) : null}
-                                </li>
-                              ))}
+                              {run.payload.tools.map((t, i) => {
+                                const block = [
+                                  t.name,
+                                  `args: ${safeJson(t.arguments)}`,
+                                  t.result ? `result: ${t.result}` : '',
+                                ]
+                                  .filter(Boolean)
+                                  .join('\n')
+                                return (
+                                  <li key={i}>
+                                    <CopyableBlock label={t.name} text={block} />
+                                  </li>
+                                )
+                              })}
                             </ul>
                           </Section>
                         ) : null}
 
                         {run.payload.reply ? (
                           <Section title="Reply / outcome">
-                            <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-muted/60 p-2 font-mono text-[10px] leading-relaxed">
-                              {JSON.stringify(run.payload.reply, null, 2)}
-                            </pre>
+                            <CopyableBlock
+                              text={JSON.stringify(run.payload.reply, null, 2)}
+                            />
                           </Section>
                         ) : null}
 
@@ -287,29 +292,43 @@ export function SalesAgentDebugPanel({
                         ) : null}
 
                         {run.payload.error ? (
-                          <p className="text-destructive">{run.payload.error}</p>
+                          <Section title="Error">
+                            <CopyableBlock text={run.payload.error} />
+                          </Section>
                         ) : null}
 
                         <Section title="Process steps">
                           <ol className="space-y-1.5 border-l-2 border-border pl-3">
-                            {(run.payload.steps ?? []).map((s, i) => (
-                              <li key={i}>
-                                <div className="flex flex-wrap gap-x-2">
-                                  <span className="font-semibold text-foreground">
-                                    {s.phase}
-                                  </span>
-                                  <span className="text-muted-foreground">
-                                    {formatTime(s.at)}
-                                  </span>
-                                </div>
-                                <p className="text-foreground/90">{s.detail}</p>
-                                {s.data !== undefined ? (
-                                  <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-1.5 font-mono text-[10px] text-muted-foreground">
-                                    {safeJson(s.data)}
-                                  </pre>
-                                ) : null}
-                              </li>
-                            ))}
+                            {(run.payload.steps ?? []).map((s, i) => {
+                              const stepText = [
+                                `[${s.phase}] ${s.detail}`,
+                                s.data !== undefined ? safeJson(s.data) : '',
+                              ]
+                                .filter(Boolean)
+                                .join('\n')
+                              return (
+                                <li key={i}>
+                                  <div className="flex flex-wrap items-center gap-x-2">
+                                    <span className="font-semibold text-foreground">
+                                      {s.phase}
+                                    </span>
+                                    <span className="text-muted-foreground">
+                                      {formatTime(s.at)}
+                                    </span>
+                                    <CopyButton text={stepText} />
+                                  </div>
+                                  <p className="select-text text-foreground/90">
+                                    {s.detail}
+                                  </p>
+                                  {s.data !== undefined ? (
+                                    <CopyableBlock
+                                      text={safeJson(s.data)}
+                                      className="mt-0.5"
+                                    />
+                                  ) : null}
+                                </li>
+                              )
+                            })}
                           </ol>
                         </Section>
 
@@ -317,9 +336,10 @@ export function SalesAgentDebugPanel({
                           <summary className="cursor-pointer select-none">
                             Raw payload JSON
                           </summary>
-                          <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted/60 p-2 font-mono text-[10px]">
-                            {JSON.stringify(run.payload, null, 2)}
-                          </pre>
+                          <CopyableBlock
+                            className="mt-1 max-h-40"
+                            text={JSON.stringify(run.payload, null, 2)}
+                          />
                         </details>
                       </div>
                     ) : null}
@@ -340,6 +360,76 @@ export function SalesAgentDebugPanel({
           ) : null}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const onCopy = async (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1200)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={copied ? 'Copied' : 'Copy'}
+      className={cn(
+        'inline-flex h-5 shrink-0 items-center gap-0.5 rounded px-1 text-[10px] transition-colors',
+        copied
+          ? 'text-emerald-700 dark:text-emerald-300'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+      )}
+    >
+      {copied ? (
+        <Check className="h-3 w-3" />
+      ) : (
+        <Copy className="h-3 w-3" />
+      )}
+      <span>{copied ? 'Copied' : 'Copy'}</span>
+    </button>
+  )
+}
+
+function CopyableBlock({
+  text,
+  label,
+  className,
+}: {
+  text: string
+  label?: string
+  className?: string
+}) {
+  return (
+    <div
+      className={cn(
+        'group relative rounded bg-muted/60 px-2 py-1 font-mono text-[10px]',
+        className,
+      )}
+    >
+      <div className="mb-0.5 flex items-center justify-between gap-2">
+        {label ? (
+          <span className="font-semibold uppercase text-muted-foreground">
+            {label}
+          </span>
+        ) : (
+          <span />
+        )}
+        <CopyButton text={text} />
+      </div>
+      <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all select-text leading-relaxed">
+        {text}
+      </pre>
     </div>
   )
 }
@@ -379,7 +469,7 @@ function Meta({ label, value }: { label: string; value: string }) {
   return (
     <p>
       <span className="font-medium text-foreground">{label}: </span>
-      <span className="text-foreground/80">{value}</span>
+      <span className="select-text text-foreground/80">{value}</span>
     </p>
   )
 }
