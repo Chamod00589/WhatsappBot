@@ -6,17 +6,25 @@ import {
   identifyInboundImage,
 } from './identify'
 import {
-  loadProductQuickReplies,
   matchProductByIdentifyName,
 } from './match-products'
 import {
+  extractAllQtys,
+  extractColorsFromText,
+  extractExplicitQty,
   extractOrderIntents,
-  extractQty,
   resolveLineItems,
   type BagOrderIntent,
 } from './order-intent'
 import type { MatchableQuickReply } from './match-products'
 import { IDENTIFY_CONFIDENCE_THRESHOLD } from './types'
+
+export type QuotationImageInput = {
+  mediaUrl?: string | null
+  metaMediaId?: string | null
+  /** Caption and/or following text tied to this image in the burst. */
+  caption?: string | null
+}
 
 /**
  * True when the customer is asking for prices / a quotation
@@ -35,21 +43,64 @@ export function isQuotationRequest(text: string): boolean {
     (/\b(ganna\s+oni|ganne|ganna)\b/.test(t) &&
       /\b(price|kohomada|kohanada|kochchara|evlo)\b/.test(t)) ||
     (/\b(me\s+bags?\s+\d+|bags?\s+\d+\s+ganna)\b/.test(t) &&
-      /\b(price|kohomada|kohanada|kochchara|evlo|kiyanna)\b/.test(t))
+      /\b(price|kohomada|kohanada|kochchara|evlo|kiyanna)\b/.test(t)) ||
+    // Multi-image buy asks: "2k ganna" / "meka 3k" on each photo
+    (/\b\d{1,2}\s*k\b/.test(t) &&
+      /\b(ganna|ganne|oni|onne|bags?|meka|mata)\b/.test(t))
 
   return priceCue
 }
 
-/** Qty per line when we have N products from a burst. */
+/**
+ * Assign a qty to each image line from its caption, else zip global qty
+ * mentions onto images in order, else 1.
+ */
+export function assignQtysToImageLines(
+  imageCount: number,
+  captions: Array<string | null | undefined>,
+  inboundText: string,
+): number[] {
+  if (imageCount <= 0) return []
+
+  const fromCaptions = captions.map((c) => extractExplicitQty(c || ''))
+  const allHaveCaptionQty = fromCaptions.every((q) => q != null)
+  if (allHaveCaptionQty) {
+    return fromCaptions.map((q) => q as number)
+  }
+
+  const globalQtys = extractAllQtys(inboundText || '')
+  const out: number[] = []
+  let zipIdx = 0
+  for (let i = 0; i < imageCount; i++) {
+    if (fromCaptions[i] != null) {
+      out.push(fromCaptions[i] as number)
+      continue
+    }
+    if (zipIdx < globalQtys.length) {
+      out.push(globalQtys[zipIdx++])
+      continue
+    }
+    out.push(1)
+  }
+
+  // If no per-caption qty and exactly one global qty + one image → that qty
+  if (
+    imageCount === 1 &&
+    fromCaptions[0] == null &&
+    globalQtys.length >= 1
+  ) {
+    out[0] = globalQtys[0]
+  }
+
+  return out
+}
+
+/** @deprecated Prefer assignQtysToImageLines for multi-image bursts. */
 export function qtyPerLine(itemCount: number, extractedQty: number): number {
   if (itemCount <= 0) return 1
   if (itemCount === 1) return Math.max(1, extractedQty)
-  // "me bags 2" + 2 images → 1 each, not qty 2 on every line
   if (extractedQty === itemCount) return 1
-  if (extractedQty > 1 && extractedQty !== itemCount) {
-    // Ambiguous multi-bag + higher qty → still 1 each (safer)
-    return 1
-  }
+  if (extractedQty > 1 && extractedQty !== itemCount) return 1
   return 1
 }
 
@@ -61,7 +112,7 @@ export async function resolveQuotationItems(args: {
   accountId: string
   inboundText: string
   catalog: MatchableQuickReply[]
-  images?: Array<{ mediaUrl?: string | null; metaMediaId?: string | null }>
+  images?: QuotationImageInput[]
   /** Min identify confidence to auto-include (default IDENTIFY_CONFIDENCE_THRESHOLD). */
   minConfidence?: number
 }): Promise<{
@@ -77,8 +128,13 @@ export async function resolveQuotationItems(args: {
     minConfidence = IDENTIFY_CONFIDENCE_THRESHOLD,
   } = args
 
+  // Split burst into lines so each bag can pick qty/color from its own line
+  const textLines = (inboundText || '')
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean)
   const namedIntents = extractOrderIntents(
-    inboundText ? [inboundText] : [],
+    textLines.length ? textLines : inboundText ? [inboundText] : [],
     catalog,
   )
   const namedItems = namedIntents.length
@@ -91,6 +147,7 @@ export async function resolveQuotationItems(args: {
     confidence: number
   }> = []
   const imageItems: OrderLineItem[] = []
+  const imageCaptions: string[] = []
 
   for (const img of images) {
     if (!img.metaMediaId && !img.mediaUrl) continue
@@ -137,11 +194,19 @@ export async function resolveQuotationItems(args: {
       )
       if (dup) continue
 
+      const caption = (img.caption || '').trim()
+      let color = best.color || ''
+      if (caption) {
+        const cols = extractColorsFromText(caption)
+        if (cols.length) color = cols[0]
+      }
+
+      imageCaptions.push(caption)
       imageItems.push({
         productId,
         name,
-        color: best.color || '',
-        qty: 1,
+        color: color || '',
+        qty: 1, // filled below
         price,
         image,
       })
@@ -150,21 +215,24 @@ export async function resolveQuotationItems(args: {
     }
   }
 
+  if (imageItems.length) {
+    const qtys = assignQtysToImageLines(
+      imageItems.length,
+      imageCaptions,
+      inboundText || '',
+    )
+    for (let i = 0; i < imageItems.length; i++) {
+      imageItems[i].qty = qtys[i] ?? 1
+    }
+  }
+
   const merged = [...namedItems, ...imageItems]
   if (!merged.length) {
     return { items: [], identified }
   }
 
-  // Named-only: keep extractOrderIntents qty as-is
-  if (!imageItems.length) {
-    return { items: namedItems, identified }
-  }
-
-  const q = qtyPerLine(merged.length, extractQty(inboundText || ''))
-  return {
-    items: merged.map((it) => ({ ...it, qty: q })),
-    identified,
-  }
+  // Keep per-line / per-image qty — do NOT overwrite with a single global qty
+  return { items: merged, identified }
 }
 
 async function resolveLineItemsWithImages(

@@ -47,6 +47,8 @@ export interface SalesAgentDispatchArgs {
   inboundImages?: Array<{
     mediaUrl?: string | null
     metaMediaId?: string | null
+    /** Caption / nearby text for this image (qty, color, etc.). */
+    caption?: string | null
   }>
   /** True when this is the contact's first-ever inbound. */
   isFirstInboundMessage?: boolean

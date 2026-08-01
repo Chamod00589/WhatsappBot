@@ -141,12 +141,98 @@ export function parseColorOnlyReply(text: string): string | null {
   return colors[0]
 }
 
-export function extractQty(text: string): number {
+/**
+ * Parse an explicit quantity from text, or null when none is mentioned.
+ * Use this when assigning qty per image/line (defaulting to 1 only at the call site).
+ */
+export function extractExplicitQty(text: string): number | null {
   const t = text.toLowerCase()
-  if (/\b(dekak|2|two)\b/.test(t)) return 2
-  if (/\b(thunak|3|three)\b/.test(t)) return 3
-  if (/\b(hatarak|4|four)\b/.test(t)) return 4
-  return 1
+  if (!t.trim()) return null
+
+  // "3k ganna oni", "bag 2k", "5k bags" — Singlish piece count (k = කීපයක්)
+  const kMatch = t.match(/\b(\d{1,2})\s*k\b/)
+  if (kMatch) {
+    const n = Number(kMatch[1])
+    if (n >= 1 && n <= 20) {
+      const qtyCue =
+        /\b(ganna|ganne|oni|onne|bags?|pcs?|pieces?|qty|quantity|venum|vaenum)\b/.test(
+          t,
+        ) ||
+        /\b(price|prices|kohomada|kohanada|kochchara|kochcara|kiyanna|evlo)\b/.test(
+          t,
+        )
+      if (qtyCue || n <= 9) return n
+    }
+  }
+
+  const explicit =
+    t.match(/\b(?:qty|quantity|x)\s*[:=]?\s*(\d{1,2})\b/) ||
+    t.match(/\b(\d{1,2})\s*(?:x|bags?|pcs?|pieces?)\b/) ||
+    t.match(/\b(?:bags?|pcs?|pieces?)\s*[:=]?\s*(\d{1,2})\b/)
+  if (explicit) {
+    const n = Number(explicit[1])
+    if (n >= 1 && n <= 50) return n
+  }
+
+  if (/\b(dekak|dekhak|two)\b/.test(t)) return 2
+  if (/\b(thunak|three)\b/.test(t)) return 3
+  if (/\b(hatarak|hatharak|four)\b/.test(t)) return 4
+  if (/\b(pahak|five)\b/.test(t)) return 5
+
+  if (/\b2\b/.test(t)) return 2
+  if (/\b3\b/.test(t)) return 3
+  if (/\b4\b/.test(t)) return 4
+  if (/\b5\b/.test(t)) return 5
+
+  return null
+}
+
+/**
+ * All explicit piece-count mentions in order (e.g. "2k" then "3k" → [2, 3]).
+ * Used to zip quantities onto multiple images when captions are missing.
+ */
+export function extractAllQtys(text: string): number[] {
+  const t = text.toLowerCase()
+  if (!t.trim()) return []
+  const out: number[] = []
+
+  for (const m of t.matchAll(/\b(\d{1,2})\s*k\b/g)) {
+    const n = Number(m[1])
+    if (n >= 1 && n <= 20) out.push(n)
+  }
+  if (out.length) return out
+
+  for (const m of t.matchAll(
+    /\b(?:qty|quantity|x)\s*[:=]?\s*(\d{1,2})\b/g,
+  )) {
+    const n = Number(m[1])
+    if (n >= 1 && n <= 50) out.push(n)
+  }
+  for (const m of t.matchAll(/\b(\d{1,2})\s*(?:bags?|pcs?|pieces?)\b/g)) {
+    const n = Number(m[1])
+    if (n >= 1 && n <= 50) out.push(n)
+  }
+
+  const wordMap: Array<[RegExp, number]> = [
+    [/\bdekak\b/g, 2],
+    [/\bthunak\b/g, 3],
+    [/\bhatarak\b/g, 4],
+    [/\bpahak\b/g, 5],
+  ]
+  for (const [re, n] of wordMap) {
+    const matches = t.match(re)
+    if (matches) for (let i = 0; i < matches.length; i++) out.push(n)
+  }
+
+  return out
+}
+
+/**
+ * Parse order/quotation quantity from Singlish / Tanglish / English.
+ * "3k ganna" → 3 (pieces). Defaults to 1 when nothing is mentioned.
+ */
+export function extractQty(text: string): number {
+  return extractExplicitQty(text) ?? 1
 }
 
 /**
@@ -164,21 +250,24 @@ export function extractOrderIntents(
   if (!hits.length) return []
 
   const colorsInMerged = extractColorsFromText(merged)
-  const qty = extractQty(merged)
+  const fallbackQty = extractQty(merged)
   const out: BagOrderIntent[] = []
 
   for (const hit of hits) {
     const name = productDisplayName(hit.title)
     // Prefer color mentioned near this product in individual messages
     let color: string | null = null
+    let qty: number | null = null
     for (const text of texts) {
       const localHits = matchProductsInText(text, [hit])
       if (!localHits.length) continue
       const localColors = extractColorsFromText(text)
-      if (localColors.length) {
+      if (localColors.length && !color) {
         color = localColors[0]
-        break
       }
+      const localQty = extractExplicitQty(text)
+      if (localQty != null && qty == null) qty = localQty
+      if (color && qty != null) break
     }
     if (!color && colorsInMerged.length === 1) color = colorsInMerged[0]
     if (!color && colorsInMerged.length > 1) {
@@ -191,7 +280,7 @@ export function extractOrderIntents(
       catalogMessageId: hit.catalog_message_id,
       name,
       color,
-      qty,
+      qty: qty ?? fallbackQty,
       quickReplyId: hit.id,
     })
   }

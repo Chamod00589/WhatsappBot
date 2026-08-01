@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   extractOrderIntents,
+  extractQty,
   parseColorOnlyReply,
   productDisplayName,
   resolveOrderIntentsForAddress,
@@ -22,6 +23,49 @@ const cloudy: MatchableQuickReply = {
 }
 
 describe('order-intent', () => {
+  it('parses Singlish Nk as quantity (3k ganna → 3)', () => {
+    expect(
+      extractQty('Mata cloudy black bag 3k ganna oni. Price kohomda'),
+    ).toBe(3)
+    expect(extractQty('bag 2k ganna oni')).toBe(2)
+    expect(extractQty('thunak bag oni')).toBe(3)
+    expect(extractQty('qty 4')).toBe(4)
+    expect(extractQty('mata bag ekak oni')).toBe(1)
+  })
+
+  it('uses per-message qty when multiple bags mentioned separately', () => {
+    const bloom: MatchableQuickReply = {
+      id: '2',
+      title: 'Bloom Shoulder Bag Details Quick Reply',
+      description: null,
+      kind: 'catalog',
+      product_id: 'bloom',
+      catalog_message_id: 'qm_site_prod_bloom',
+      needles: buildProductNeedles(
+        'Bloom Shoulder Bag Details Quick Reply',
+        'bloom',
+      ),
+    }
+    const intents = extractOrderIntents(
+      ['cloudy black 2k ganna', 'bloom pink 3k ganna'],
+      [cloudy, bloom],
+    )
+    expect(intents).toHaveLength(2)
+    const byName = Object.fromEntries(
+      intents.map((i) => [i.name.toLowerCase(), i.qty]),
+    )
+    expect(byName['cloudy shoulder bag']).toBe(2)
+    expect(byName['bloom shoulder bag']).toBe(3)
+  })
+
+  it('uses qty 3 from 3k in quotation-style buy ask', () => {
+    const text = 'Mata cloudy black bag 3k ganna oni. Price kohomda'
+    const intents = extractOrderIntents([text], [cloudy])
+    expect(intents).toHaveLength(1)
+    expect(intents[0].qty).toBe(3)
+    expect(intents[0].color?.toLowerCase()).toBe('black')
+  })
+
   it('extracts bag + black color from singlish buy message', () => {
     const text =
       'Mata cloudy black color bag ekak oni\n\nChamod\nNo 280\nUttalapura\nDehiattakandiya\n0779522100'

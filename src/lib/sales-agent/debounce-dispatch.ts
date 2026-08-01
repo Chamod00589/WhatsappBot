@@ -179,38 +179,133 @@ async function mergeBurstArgs(
       ? texts.join('\n')
       : bufferTexts.join('\n') || buf.base.inboundText
 
-  // Collect ALL images in the burst (multi-image identify / quotation).
-  const inboundImages: Array<{
+  // Collect ALL images in the burst with per-image captions.
+  // Caption = image message text, or following text-only msg(s) until the next image.
+  type ImgSlot = {
     mediaUrl?: string | null
     metaMediaId?: string | null
-  }> = []
+    caption: string
+  }
+  const inboundImages: ImgSlot[] = []
   const seen = new Set<string>()
-  const pushImage = (mediaUrl?: string | null, metaMediaId?: string | null) => {
+
+  const imageKey = (
+    mediaUrl?: string | null,
+    metaMediaId?: string | null,
+  ): string | null => {
     const extractedId =
       metaMediaId ||
       mediaUrl?.match(/\/api\/whatsapp\/media\/([^/?#]+)/)?.[1] ||
       null
     const key = `${extractedId || ''}|${mediaUrl || ''}`
-    if (!key.replace('|', '') || seen.has(key)) return
-    seen.add(key)
-    inboundImages.push({
-      mediaUrl: mediaUrl ?? null,
-      metaMediaId: extractedId,
-    })
+    if (!key.replace('|', '')) return null
+    return key
   }
 
+  const appendCaption = (slot: ImgSlot, text: string) => {
+    const t = text.trim()
+    if (!t) return
+    slot.caption = slot.caption ? `${slot.caption}\n${t}` : t
+  }
+
+  type ChronoEvent =
+    | { kind: 'image'; mediaUrl?: string | null; metaMediaId?: string | null; text: string }
+    | { kind: 'text'; text: string }
+
+  const chrono: ChronoEvent[] = []
+
+  // Prefer DB order when we have customer rows (covers multi-webhook bursts).
+  if ((rows ?? []).length > 0) {
+    for (const r of rows ?? []) {
+      const text =
+        typeof r.content_text === 'string' ? r.content_text.trim() : ''
+      if (r.content_type === 'image') {
+        const url = typeof r.media_url === 'string' ? r.media_url : null
+        if (!url && !text) continue
+        chrono.push({ kind: 'image', mediaUrl: url, metaMediaId: null, text })
+      } else if (text) {
+        chrono.push({ kind: 'text', text })
+      }
+    }
+  } else {
+    for (const p of buf.parts) {
+      const text = (p.text || '').trim()
+      const isImg = p.contentType === 'image' || !!p.metaMediaId || !!p.mediaUrl
+      if (isImg) {
+        chrono.push({
+          kind: 'image',
+          mediaUrl: p.mediaUrl,
+          metaMediaId: p.metaMediaId,
+          text,
+        })
+      } else if (text) {
+        chrono.push({ kind: 'text', text })
+      }
+    }
+  }
+
+  // Merge in-memory image parts that DB missed (metaMediaId often only in buffer).
+  // Match by URL / order to attach meta ids.
+  if ((rows ?? []).length > 0 && buf.parts.length) {
+    const bufImgs = buf.parts.filter(
+      (p) => p.contentType === 'image' || p.metaMediaId || p.mediaUrl,
+    )
+    let bi = 0
+    for (const ev of chrono) {
+      if (ev.kind !== 'image') continue
+      const bp = bufImgs[bi++]
+      if (!bp) break
+      if (!ev.metaMediaId && bp.metaMediaId) ev.metaMediaId = bp.metaMediaId
+      if (!ev.mediaUrl && bp.mediaUrl) ev.mediaUrl = bp.mediaUrl
+      if (!ev.text && bp.text?.trim()) ev.text = bp.text.trim()
+    }
+  }
+
+  let lastImage: ImgSlot | null = null
+  for (const ev of chrono) {
+    if (ev.kind === 'image') {
+      const key = imageKey(ev.mediaUrl, ev.metaMediaId)
+      if (!key || seen.has(key)) {
+        // Duplicate image — still attach caption text to previous matching slot
+        if (ev.text && lastImage) appendCaption(lastImage, ev.text)
+        continue
+      }
+      seen.add(key)
+      const extractedId =
+        ev.metaMediaId ||
+        ev.mediaUrl?.match(/\/api\/whatsapp\/media\/([^/?#]+)/)?.[1] ||
+        null
+      const slot: ImgSlot = {
+        mediaUrl: ev.mediaUrl ?? null,
+        metaMediaId: extractedId,
+        caption: ev.text || '',
+      }
+      inboundImages.push(slot)
+      lastImage = slot
+    } else if (lastImage) {
+      // Text after an image belongs to that image until the next image arrives
+      appendCaption(lastImage, ev.text)
+    }
+  }
+
+  // Buffer may have images the DB query hasn't persisted yet — append those.
   for (const p of buf.parts) {
-    if (!(p.contentType === 'image' || p.metaMediaId || p.mediaUrl)) continue
-    pushImage(p.mediaUrl, p.metaMediaId)
-  }
-
-  // Also pull customer images persisted since last bot reply (covers
-  // concurrent webhooks / lost in-memory parts).
-  for (const r of rows ?? []) {
-    if (r.content_type !== 'image') continue
-    const url = typeof r.media_url === 'string' ? r.media_url : null
-    if (!url) continue
-    pushImage(url, null)
+    const isImg = p.contentType === 'image' || !!p.metaMediaId || !!p.mediaUrl
+    if (!isImg) continue
+    const key = imageKey(p.mediaUrl, p.metaMediaId)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    const extractedId =
+      p.metaMediaId ||
+      p.mediaUrl?.match(/\/api\/whatsapp\/media\/([^/?#]+)/)?.[1] ||
+      null
+    const slot: ImgSlot = {
+      mediaUrl: p.mediaUrl ?? null,
+      metaMediaId: extractedId,
+      caption: (p.text || '').trim(),
+    }
+    inboundImages.push(slot)
+    lastImage = slot
   }
 
   let mediaUrl = buf.base.mediaUrl ?? null
