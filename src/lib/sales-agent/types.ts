@@ -40,6 +40,14 @@ export interface SalesAgentDispatchArgs {
   mediaUrl?: string | null
   /** Meta media id for inbound images — preferred for identify download. */
   metaMediaId?: string | null
+  /**
+   * All images in a debounced burst (for multi-image quotation).
+   * When set, identify/quotation can process every attachment.
+   */
+  inboundImages?: Array<{
+    mediaUrl?: string | null
+    metaMediaId?: string | null
+  }>
   /** True when this is the contact's first-ever inbound. */
   isFirstInboundMessage?: boolean
 }

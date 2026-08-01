@@ -73,7 +73,8 @@ export function buildSalesAgentTools(caps: AiConfigWithSales) {
       type: 'function',
       function: {
         name: 'send_quotation',
-        description: 'Send a price quotation for selected bags.',
+        description:
+          'Send a Price Quotation screenshot (same as inbox Create Quotation) for selected bags when the customer asks for prices.',
         parameters: {
           type: 'object',
           properties: {

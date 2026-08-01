@@ -38,7 +38,11 @@ import {
   rememberAnsweredQuestion,
 } from './dedupe'
 import { maybeConfirmOrderTag } from './confirm-order-tag'
-import { isAddressLikeMessage, actionCreateOrder } from './actions/orders'
+import {
+  isAddressLikeMessage,
+  actionCreateOrder,
+  actionSendQuotation,
+} from './actions/orders'
 import { runSalesAgentToolLoop } from './tool-loop'
 import { SalesAgentRunLogger } from './debug-log'
 import { engineSendText } from '@/lib/flows/meta-send'
@@ -55,6 +59,10 @@ import {
   shouldRunOrderIntake,
   type OrderPendingState,
 } from './order-intent'
+import {
+  isQuotationRequest,
+  resolveQuotationItems,
+} from './quotation-intent'
 
 /**
  * Sales Agent entry — replaces plain AI auto-reply when sales_agent_enabled.
@@ -85,7 +93,15 @@ export async function dispatchSalesAgentNow(
     contentType,
     mediaUrl,
     metaMediaId,
+    inboundImages: inboundImagesArg,
   } = args
+
+  const inboundImages =
+    inboundImagesArg?.length
+      ? inboundImagesArg
+      : mediaUrl || metaMediaId
+        ? [{ mediaUrl, metaMediaId }]
+        : []
 
   const db = supabaseAdmin()
   const log = new SalesAgentRunLogger(db, {
@@ -287,6 +303,52 @@ export async function dispatchSalesAgentNow(
       conversationId,
       12,
     )
+
+    // 2c) Price / quotation request (bag names and/or images) → QuotationCard PNG
+    if (config.quotation && isQuotationRequest(inboundText)) {
+      log.step('quotation', 'Price/quotation intent detected', {
+        images: inboundImages.length,
+      })
+      const { items, identified } = await resolveQuotationItems({
+        db,
+        accountId,
+        inboundText,
+        catalog: products,
+        images: inboundImages,
+      })
+      log.step(
+        'quotation',
+        items.length
+          ? `Resolved ${items.length} line item(s) for quotation`
+          : 'No resolvable bags for quotation',
+        { items, identified },
+      )
+      if (items.length > 0) {
+        const r = await actionSendQuotation({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          configOwnerUserId,
+          items,
+          useSinglish,
+        })
+        log.step(
+          'quotation',
+          r.ok ? r.message : `Quotation failed: ${r.message}`,
+        )
+        if (r.ok) {
+          await rememberAnsweredQuestion(db, conversationId, inboundText)
+          await claimSlot(
+            db,
+            conversationId,
+            config.autoReplyMaxPerConversation,
+          )
+          await log.complete()
+          return
+        }
+      }
+    }
 
     // 2b) Awaiting color for order — customer replies with a color
     const orderPending = parseOrderPending(gate.conversation.sa_order_pending)

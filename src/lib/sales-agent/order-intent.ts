@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { fetchCatalogProduct } from '@/lib/catalog/products'
+import { catalogImageForColor } from '@/lib/orders/catalog-helpers'
 import type { OrderLineItem } from '@/lib/orders/constants'
 import { normalizeMatchText } from './normalize'
 import {
@@ -204,12 +205,14 @@ export async function resolveLineItems(
   for (const intent of intents) {
     let price = 0
     let name = intent.name
+    let image: string | undefined
     if (intent.productId) {
       try {
         const p = await fetchCatalogProduct(intent.productId)
         if (p) {
           price = p.price || 0
           name = p.name || name
+          image = catalogImageForColor(p, intent.color || p.colors[0] || '')
         }
       } catch {
         /* ignore */
@@ -221,6 +224,7 @@ export async function resolveLineItems(
       color: intent.color || '',
       qty: intent.qty,
       price,
+      image,
     })
   }
   return items

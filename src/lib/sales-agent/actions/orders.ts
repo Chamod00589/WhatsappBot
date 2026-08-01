@@ -24,6 +24,7 @@ import {
 import { formatOrderLabelBarcode } from '@/lib/orders/constants'
 import { catalogBaseUrl } from '@/lib/catalog/products'
 import { sendOrderConfirmScreenshot } from '../order-screenshot'
+import { sendQuotationScreenshot } from '../quotation-screenshot'
 import { addNamedTag } from '../tags'
 import { CONTEXT_BLURBS } from '../types'
 
@@ -298,36 +299,48 @@ export async function actionSendQuotation(args: {
   } = args
   if (!items.length) return { ok: false, message: 'No items for quotation' }
 
-  const lines: string[] = [
-    useSinglish ? '*Quotation*' : '*Quotation*',
-    '',
-  ]
-  let sub = 0
-  for (const it of items) {
-    const line = Number(it.price) * Number(it.qty)
-    sub += line
-    const color = it.color ? ` (${it.color})` : ''
-    lines.push(`• ${it.name}${color} x${it.qty} — ${formatLkr(line)}`)
-  }
-  lines.push(`Shipping: ${formatLkr(QUOTATION_SHIPPING_LKR)}`)
-  lines.push(`Total: ${formatLkr(sub + QUOTATION_SHIPPING_LKR)}`)
-  lines.push('')
-  lines.push(
-    useSinglish
-      ? 'Order karanna oni nam name, address, phone number eka send karanna.'
-      : 'Order pannanum na name, address, phone number anupunga.',
-  )
+  const caption = useSinglish
+    ? 'Order karanna oni nam name, address, phone number eka send karanna.'
+    : 'Order pannanum na name, address, phone number anupunga.'
 
-  await engineSendText({
-    accountId,
-    userId: configOwnerUserId,
-    conversationId,
-    contactId,
-    text: lines.join('\n'),
-    aiGenerated: true,
-  })
-  await stampSummary(db, conversationId, CONTEXT_BLURBS.quotation)
-  return { ok: true, message: 'Quotation sent' }
+  try {
+    await sendQuotationScreenshot({
+      db,
+      accountId,
+      conversationId,
+      contactId,
+      configOwnerUserId,
+      items,
+      caption,
+    })
+    return { ok: true, message: 'Quotation screenshot sent' }
+  } catch (err) {
+    console.error('[sales-agent] quotation screenshot failed:', err)
+    // Fallback: text quotation (same numbers)
+    const lines: string[] = ['*Price Quotation*', '']
+    let sub = 0
+    for (const it of items) {
+      const line = Number(it.price) * Number(it.qty)
+      sub += line
+      const color = it.color ? ` (${it.color})` : ''
+      lines.push(`• ${it.name}${color} x${it.qty} — ${formatLkr(line)}`)
+    }
+    lines.push(`Shipping: ${formatLkr(QUOTATION_SHIPPING_LKR)}`)
+    lines.push(`Total: ${formatLkr(sub + QUOTATION_SHIPPING_LKR)}`)
+    lines.push('')
+    lines.push(caption)
+
+    await engineSendText({
+      accountId,
+      userId: configOwnerUserId,
+      conversationId,
+      contactId,
+      text: lines.join('\n'),
+      aiGenerated: true,
+    })
+    await stampSummary(db, conversationId, CONTEXT_BLURBS.quotation)
+    return { ok: true, message: 'Quotation text sent (screenshot failed)' }
+  }
 }
 
 export async function actionEditOrder(args: {

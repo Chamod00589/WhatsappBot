@@ -177,16 +177,32 @@ async function mergeBurstArgs(
       ? texts.join('\n')
       : bufferTexts.join('\n') || buf.base.inboundText
 
-  // Latest image in the burst (buffer order), else base args.
+  // Collect ALL images in the burst (multi-image quotation / identify).
+  const inboundImages: Array<{
+    mediaUrl?: string | null
+    metaMediaId?: string | null
+  }> = []
+  const seen = new Set<string>()
+  for (const p of buf.parts) {
+    if (!(p.contentType === 'image' || p.metaMediaId || p.mediaUrl)) continue
+    const key = `${p.metaMediaId || ''}|${p.mediaUrl || ''}`
+    if (!key.replace('|', '') || seen.has(key)) continue
+    seen.add(key)
+    inboundImages.push({
+      mediaUrl: p.mediaUrl ?? null,
+      metaMediaId: p.metaMediaId ?? null,
+    })
+  }
+
+  // Latest image kept for backward-compat identify path
   let mediaUrl = buf.base.mediaUrl ?? null
   let metaMediaId = buf.base.metaMediaId ?? null
   let contentType = buf.base.contentType
-  for (const p of buf.parts) {
-    if (p.contentType === 'image' || p.metaMediaId || p.mediaUrl) {
-      contentType = p.contentType || 'image'
-      mediaUrl = p.mediaUrl ?? mediaUrl
-      metaMediaId = p.metaMediaId ?? metaMediaId
-    }
+  if (inboundImages.length) {
+    const last = inboundImages[inboundImages.length - 1]
+    mediaUrl = last.mediaUrl ?? mediaUrl
+    metaMediaId = last.metaMediaId ?? metaMediaId
+    contentType = 'image'
   }
 
   return {
@@ -195,5 +211,6 @@ async function mergeBurstArgs(
     contentType,
     mediaUrl,
     metaMediaId,
+    inboundImages,
   }
 }
