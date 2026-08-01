@@ -1,18 +1,38 @@
-import sharp from 'sharp'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
   formatOrderLabelBarcode,
-  formatOrderMoney,
   ORDER_STATUS_LABELS,
   orderShippingShortLabel,
   buildOrderScreenshotCaption,
 } from '@/lib/orders/constants'
-import { catalogBaseUrl } from '@/lib/catalog/products'
+import { catalogImageForColor } from '@/lib/orders/catalog-helpers'
+import { catalogBaseUrl, fetchCatalogProduct } from '@/lib/catalog/products'
 import { CONTEXT_BLURBS } from './types'
 import {
   sendGeneratedCardImage,
   type CardMediaDebug,
 } from './send-card-media'
+import {
+  CARD_BORDER,
+  CARD_W,
+  BODY,
+  FG,
+  FONT,
+  MUTED,
+  ROW_BG,
+  THUMB_BG,
+  cardShell,
+  encodeCardJpeg,
+  esc,
+  formatOrderMoneyTm,
+  loadThumbBuffer,
+  wrapLines,
+} from './card-screenshot-shared'
+import {
+  loadProductQuickReplies,
+  matchProductByIdentifyName,
+  matchProductsInText,
+} from './match-products'
 
 type OrderLike = Record<string, unknown>
 
@@ -21,23 +41,90 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0
 }
 
-function esc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+type EnrichedItem = {
+  name: string
+  color: string
+  quantity: number
+  price: number
+  image?: string
+}
+
+/** Fill missing price/image from catalog — same idea as Tampermonkey resolveOrderItemImage. */
+export async function enrichOrderItemsForScreenshot(
+  db: SupabaseClient,
+  accountId: string,
+  items: OrderLike[],
+): Promise<EnrichedItem[]> {
+  const catalog = await loadProductQuickReplies(db, accountId)
+  const out: EnrichedItem[] = []
+
+  for (const it of items) {
+    let name = String(it.name || 'Item')
+    let color = String(it.color || '')
+    let price = num(it.price)
+    let image =
+      typeof it.image === 'string' && it.image ? String(it.image) : undefined
+    const productId =
+      (typeof it.productId === 'string' && it.productId) ||
+      (typeof it.product_id === 'string' && it.product_id) ||
+      undefined
+
+    if (!price || !image) {
+      let pid = productId
+      if (!pid && name) {
+        const byName =
+          matchProductByIdentifyName(name, catalog) ||
+          matchProductsInText(name, catalog)[0] ||
+          null
+        pid = byName?.product_id || undefined
+      }
+      if (pid) {
+        try {
+          const p = await fetchCatalogProduct(pid)
+          if (p) {
+            name = p.name || name
+            if (!price) price = Number(p.price) || 0
+            if (!image) {
+              image = catalogImageForColor(p, color || p.colors[0] || '')
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    out.push({
+      name,
+      color,
+      quantity: Math.max(1, num(it.quantity ?? it.qty)),
+      price,
+      image,
+    })
+  }
+  return out
 }
 
 /**
- * Render an OrderCard-like JPEG (WhatsApp-dark card) via sharp + SVG.
+ * Render OrderCard matching Tampermonkey `renderOrderCardHtml` / inbox OrderCard.
  */
-export async function renderOrderCardJpeg(order: OrderLike): Promise<Buffer> {
-  const items = Array.isArray(order.items) ? (order.items as OrderLike[]) : []
-  const itemsTotal = items.reduce(
-    (sum, it) => sum + num(it.price) * num(it.quantity ?? it.qty),
-    0,
-  )
+export async function renderOrderCardJpeg(
+  order: OrderLike,
+  opts?: { enrichedItems?: EnrichedItem[] },
+): Promise<Buffer> {
+  const rawItems = Array.isArray(order.items) ? (order.items as OrderLike[]) : []
+  const items =
+    opts?.enrichedItems ||
+    rawItems.map((it) => ({
+      name: String(it.name || 'Item'),
+      color: String(it.color || ''),
+      quantity: Math.max(1, num(it.quantity ?? it.qty)),
+      price: num(it.price),
+      image:
+        typeof it.image === 'string' && it.image ? String(it.image) : undefined,
+    }))
+
+  const itemsTotal = items.reduce((sum, it) => sum + it.price * it.quantity, 0)
   const courierCharge = num(order.courier_charge ?? order.shipping_cost)
   const totalAmount = num(order.total_amount) || itemsTotal + courierCharge
   const amountPaid = num(order.amount_paid)
@@ -53,151 +140,199 @@ export async function renderOrderCardJpeg(order: OrderLike): Promise<Buffer> {
   const shipLabel = orderShippingShortLabel(
     typeof order.shipping_method === 'string' ? order.shipping_method : null,
   )
+  const saleLabel = order.sale_type === 'wholesale' ? 'Wholesale' : 'Retail'
   const labelId = formatOrderLabelBarcode(
     typeof order.id === 'string' ? order.id : null,
   )
   const created = order.created_at
-    ? new Date(String(order.created_at)).toLocaleString('en-LK')
+    ? new Date(String(order.created_at)).toLocaleString()
     : ''
-  const fullName = String(order.full_name || order.customer_name || '-')
+  const fullName = String(order.full_name || order.customer_name || '—')
   const address = String(order.address || '')
   const mobile1 = String(order.mobile_1 || order.phone || '')
   const mobile2 = String(order.mobile_2 || order.phone2 || '')
+  const waChat = String(order.whatsapp_phone || '')
   const city = String(order.city || '')
+  const tracking = String(order.tracking_number || '')
 
   const addressLines = address
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
 
-  let y = 28
-  const rows: string[] = []
-  const push = (line: string, dy = 18) => {
-    rows.push(line.replace(/\{\{Y\}\}/g, String(y)))
-    y += dy
-  }
-  const font = 'DejaVu Sans, Arial, sans-serif'
+  const pad = 8
+  const rowH = 72
+  const thumbSize = 56
+  let y = pad + 14
+  const parts: string[] = []
+  const thumbSlots: Array<{ x: number; y: number; index: number }> = []
 
-  push(
-    `<text x="16" y="{{Y}}" font-family="monospace" font-size="11" fill="#8696a0">${esc(labelId)}</text>`,
-    16,
+  // Header: label + created
+  parts.push(
+    `<text x="16" y="${y}" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="${MUTED}">${esc(labelId)}</text>`,
   )
+  y += 16
   if (created) {
-    push(
-      `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#8696a0">${esc(created)}</text>`,
-      16,
+    parts.push(
+      `<text x="16" y="${y}" font-family="${FONT}" font-size="11" fill="${MUTED}">${esc(created)}</text>`,
     )
+    y += 18
   }
-  push(
-    `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#e9edef">${esc(statusLabel)} · Retail · ${esc(shipLabel)}</text>`,
-    26,
-  )
 
-  push(
-    `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#8696a0">CUSTOMER</text>`,
-    18,
-  )
-  push(
-    `<text x="16" y="{{Y}}" font-family="${font}" font-size="14" font-weight="700" fill="#e9edef">${esc(fullName)}</text>`,
-    20,
-  )
-  addressLines.forEach((line) => {
-    push(
-      `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" fill="#cfd7db">${esc(line)}</text>`,
-      18,
+  // Badges (status / sale / ship) — pill rows like Tampermonkey
+  const badges = [
+    { label: statusLabel, bg: '#334155', fg: FG },
+    { label: saleLabel, bg: CARD_BORDER, fg: FG },
+    { label: shipLabel, bg: '#422006', fg: '#fcd34d' },
+  ]
+  let bx = 16
+  const badgeY = y
+  for (const b of badges) {
+    const tw = Math.min(140, 10 + b.label.length * 6.2)
+    parts.push(
+      `<rect x="${bx}" y="${badgeY}" width="${tw}" height="18" rx="9" fill="${b.bg}"/>`,
+      `<text x="${bx + tw / 2}" y="${badgeY + 13}" text-anchor="middle" font-family="${FONT}" font-size="10" fill="${b.fg}">${esc(b.label)}</text>`,
     )
+    bx += tw + 6
+  }
+  y += 28
+
+  // Customer
+  parts.push(
+    `<text x="16" y="${y}" font-family="${FONT}" font-size="11" fill="${MUTED}" letter-spacing="0.5">CUSTOMER</text>`,
+  )
+  y += 18
+  parts.push(
+    `<text x="16" y="${y}" font-family="${FONT}" font-size="14" font-weight="700" fill="${FG}">${esc(fullName)}</text>`,
+  )
+  y += 18
+  addressLines.forEach((line, i) => {
+    const prefix = i === 0 ? 'Loc: ' : ''
+    for (const wl of wrapLines(prefix + line, 46, 2)) {
+      parts.push(
+        `<text x="16" y="${y}" font-family="${FONT}" font-size="13" fill="${BODY}">${esc(wl)}</text>`,
+      )
+      y += 17
+    }
   })
   if (mobile1) {
-    push(
-      `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" fill="#cfd7db">${esc(mobile1)}</text>`,
-      18,
+    parts.push(
+      `<text x="16" y="${y}" font-family="${FONT}" font-size="13" fill="${BODY}">Tel: ${esc(mobile1)}</text>`,
     )
+    y += 17
   }
   if (mobile2) {
-    push(
-      `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" fill="#cfd7db">${esc(mobile2)}</text>`,
-      18,
+    parts.push(
+      `<text x="16" y="${y}" font-family="${FONT}" font-size="13" fill="${BODY}">Tel: ${esc(mobile2)}</text>`,
     )
+    y += 17
+  }
+  if (waChat && waChat !== mobile1) {
+    parts.push(
+      `<text x="16" y="${y}" font-family="${FONT}" font-size="13" fill="${MUTED}">WA: ${esc(waChat)}</text>`,
+    )
+    y += 17
   }
   if (city) {
-    push(
-      `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" fill="#cfd7db">${esc(city)}</text>`,
-      22,
+    parts.push(
+      `<text x="16" y="${y}" font-family="${FONT}" font-size="13" fill="${BODY}">City: ${esc(city)}</text>`,
     )
+    y += 17
   }
 
-  push(
-    `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#8696a0">ITEMS</text>`,
-    20,
+  y += 8
+  parts.push(
+    `<text x="16" y="${y}" font-family="${FONT}" font-size="11" fill="${MUTED}" letter-spacing="0.5">ITEMS</text>`,
   )
+  y += 10
 
   if (!items.length) {
-    push(
-      `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">No items</text>`,
-      20,
+    y += 16
+    parts.push(
+      `<text x="16" y="${y}" font-family="${FONT}" font-size="12" fill="${MUTED}">No items</text>`,
     )
+    y += 20
   } else {
-    for (const it of items) {
-      const qty = num(it.quantity ?? it.qty)
-      const price = num(it.price)
-      const lineTotal = qty * price
-      const name = String(it.name || 'Item')
-      const color = it.color ? ` (${String(it.color)})` : ''
-      push(
-        `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" font-weight="600" fill="#e9edef">${esc(name + color)}</text>`,
-        16,
+    items.forEach((it, idx) => {
+      const top = y
+      const lineTotal = it.price * it.quantity
+      const label = `${it.name}${it.color ? ` (${it.color})` : ''}`
+      const nameLines = wrapLines(label, 28, 2)
+
+      parts.push(
+        `<rect x="8" y="${top}" width="344" height="${rowH}" rx="8" fill="${ROW_BG}" stroke="${CARD_BORDER}"/>`,
+        `<rect x="16" y="${top + 8}" width="${thumbSize}" height="${thumbSize}" rx="6" fill="${THUMB_BG}"/>`,
+        `<text x="44" y="${top + 40}" text-anchor="middle" font-family="${FONT}" font-size="11" fill="#54656f">—</text>`,
       )
-      push(
-        `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#8696a0">Qty ${qty} x ${esc(formatOrderMoney(price))}   ${esc(formatOrderMoney(lineTotal))}</text>`,
-        22,
+      thumbSlots.push({ x: 16, y: top + 8, index: idx })
+
+      let ty = top + 24
+      for (const nl of nameLines) {
+        parts.push(
+          `<text x="84" y="${ty}" font-family="${FONT}" font-size="12" font-weight="600" fill="${FG}">${esc(nl)}</text>`,
+        )
+        ty += 15
+      }
+      parts.push(
+        `<text x="84" y="${top + 58}" font-family="${FONT}" font-size="11" fill="${MUTED}">Qty ${it.quantity} x ${esc(formatOrderMoneyTm(it.price))}</text>`,
+        `<text x="340" y="${top + 40}" text-anchor="end" font-family="${FONT}" font-size="12" font-weight="700" fill="${FG}">${esc(formatOrderMoneyTm(lineTotal))}</text>`,
       )
-    }
+      y += rowH + 8
+    })
   }
 
+  // Totals
   y += 4
-  push(
-    `<line x1="16" y1="{{Y}}" x2="344" y2="{{Y}}" stroke="#2a3942" stroke-width="1"/>`,
-    18,
+  parts.push(
+    `<line x1="8" y1="${y}" x2="352" y2="${y}" stroke="${CARD_BORDER}" stroke-width="1"/>`,
   )
-  push(
-    `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">Items</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="12" fill="#8696a0">${esc(formatOrderMoney(itemsTotal))}</text>`,
-    18,
-  )
-  push(
-    `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">${esc(shipLabel)}</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="12" fill="#8696a0">${esc(formatOrderMoney(courierCharge))}</text>`,
-    18,
-  )
+  y += 18
+
+  const moneyRow = (label: string, amount: number, strong = false) => {
+    const fill = strong ? FG : MUTED
+    const size = strong ? 13 : 12
+    const weight = strong ? '700' : '400'
+    parts.push(
+      `<text x="16" y="${y}" font-family="${FONT}" font-size="${size}" font-weight="${weight}" fill="${fill}">${esc(label)}</text>`,
+      `<text x="344" y="${y}" text-anchor="end" font-family="${FONT}" font-size="${size}" font-weight="${weight}" fill="${fill}">${esc(formatOrderMoneyTm(amount))}</text>`,
+    )
+    y += strong ? 20 : 17
+  }
+
+  moneyRow('Items', itemsTotal)
+  moneyRow(shipLabel, courierCharge)
   if (showPayment) {
-    push(
-      `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">Order total</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="12" fill="#8696a0">${esc(formatOrderMoney(totalAmount))}</text>`,
-      18,
-    )
-    push(
-      `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">Paid</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="12" fill="#8696a0">${esc(formatOrderMoney(amountPaid))}</text>`,
-      18,
-    )
+    moneyRow('Order total', totalAmount)
+    moneyRow('Paid', amountPaid)
   }
-  const totalShow = showPayment ? remaining : totalAmount
-  push(
-    `<text x="16" y="{{Y}}" font-family="${font}" font-size="14" font-weight="700" fill="#e9edef">Total</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="14" font-weight="700" fill="#e9edef">${esc(formatOrderMoney(totalShow))}</text>`,
-    24,
-  )
+  moneyRow('Total', showPayment ? remaining : totalAmount, true)
 
-  const height = Math.max(y + 20, 280)
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg width="360" height="${height}" viewBox="0 0 360 ${height}" xmlns="http://www.w3.org/2000/svg">
-  <rect width="360" height="${height}" rx="8" fill="#182229"/>
-  <rect x="0.5" y="0.5" width="359" height="${height - 1}" rx="8" fill="none" stroke="#2a3942"/>
-  ${rows.join('\n  ')}
-</svg>`
-
-  const jpeg = await sharp(Buffer.from(svg))
-    .jpeg({ quality: 88, mozjpeg: true })
-    .toBuffer()
-  if (jpeg.byteLength < 500) {
-    throw new Error(`Order card JPEG too small (${jpeg.byteLength} bytes)`)
+  if (tracking) {
+    y += 4
+    const tw = Math.min(120, 10 + shipLabel.length * 6.2)
+    parts.push(
+      `<rect x="16" y="${y - 12}" width="${tw}" height="16" rx="4" fill="#422006"/>`,
+      `<text x="${16 + tw / 2}" y="${y}" text-anchor="middle" font-family="${FONT}" font-size="10" fill="#fcd34d">${esc(shipLabel)}</text>`,
+      `<text x="${16 + tw + 8}" y="${y}" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="${FG}">${esc(tracking)}</text>`,
+    )
+    y += 16
   }
-  return jpeg
+
+  const height = Math.max(y + 16, 280)
+  const svg = cardShell(height, parts.join('\n  '))
+
+  const composites: Array<{ input: Buffer; left: number; top: number }> = []
+  for (const slot of thumbSlots) {
+    const thumb = await loadThumbBuffer(items[slot.index]?.image, thumbSize)
+    if (!thumb) continue
+    composites.push({
+      input: thumb,
+      left: slot.x,
+      top: Math.round(slot.y),
+    })
+  }
+
+  return encodeCardJpeg(svg, composites)
 }
 
 /** @deprecated use renderOrderCardJpeg */
@@ -206,8 +341,8 @@ export async function renderOrderCardPng(order: OrderLike): Promise<Buffer> {
 }
 
 /**
- * Send the same order-confirm image + caption used by inbox
- * "Send order screenshot after creating".
+ * Send the same order-confirm image + caption used by inbox /
+ * Tampermonkey "Send order screenshot after creating".
  */
 export async function sendOrderConfirmScreenshot(args: {
   db: SupabaseClient
@@ -220,10 +355,17 @@ export async function sendOrderConfirmScreenshot(args: {
   const { db, accountId, conversationId, contactId, configOwnerUserId, order } =
     args
 
-  const jpeg = await renderOrderCardJpeg(order)
-  const items = Array.isArray(order.items) ? (order.items as OrderLike[]) : []
-  const itemsTotal = items.reduce(
-    (sum, it) => sum + num(it.price) * num(it.quantity ?? it.qty),
+  const rawItems = Array.isArray(order.items) ? (order.items as OrderLike[]) : []
+  const enrichedItems = await enrichOrderItemsForScreenshot(
+    db,
+    accountId,
+    rawItems,
+  )
+  const orderForRender: OrderLike = { ...order, items: enrichedItems }
+
+  const jpeg = await renderOrderCardJpeg(orderForRender, { enrichedItems })
+  const itemsTotal = enrichedItems.reduce(
+    (sum, it) => sum + it.price * it.quantity,
     0,
   )
   const captionTotal =
@@ -250,6 +392,15 @@ export async function sendOrderConfirmScreenshot(args: {
     contextSummary: CONTEXT_BLURBS.orderConfirm,
   })
 
-  console.info('[sales-agent] order screenshot sent', debug)
+  console.info('[sales-agent] order screenshot sent', {
+    ...debug,
+    items: enrichedItems.map((i) => ({
+      name: i.name,
+      color: i.color,
+      qty: i.quantity,
+      price: i.price,
+      hasImage: Boolean(i.image),
+    })),
+  })
   return debug
 }

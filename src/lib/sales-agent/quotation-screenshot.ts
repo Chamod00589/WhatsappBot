@@ -1,9 +1,7 @@
-import sharp from 'sharp'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { fetchCatalogProduct } from '@/lib/catalog/products'
 import { catalogImageForColor } from '@/lib/orders/catalog-helpers'
 import {
-  formatLkr,
   QUOTATION_SHIPPING_LKR,
   type OrderLineItem,
 } from '@/lib/orders/constants'
@@ -17,14 +15,22 @@ import {
   sendGeneratedCardImage,
   type CardMediaDebug,
 } from './send-card-media'
-
-function esc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
+import {
+  CARD_BORDER,
+  CARD_W,
+  BODY,
+  FG,
+  FONT,
+  MUTED,
+  ROW_BG,
+  THUMB_BG,
+  cardShell,
+  encodeCardJpeg,
+  esc,
+  formatQuotationMoneyTm,
+  loadThumbBuffer,
+  wrapLines,
+} from './card-screenshot-shared'
 
 /** Resolve missing price / image / productId from the catalog. */
 export async function enrichQuotationLineItems(
@@ -41,15 +47,17 @@ export async function enrichQuotationLineItems(
     let productId = it.productId
     let name = it.name
 
-    if ((!price || !image || !productId) && name) {
-      const byName =
-        matchProductByIdentifyName(name, catalog) ||
-        matchProductsInText(name, catalog)[0] ||
-        null
-      if (byName?.product_id) {
-        productId = productId || byName.product_id
+    if (!price || !image || !productId) {
+      if (!productId && name) {
+        const byName =
+          matchProductByIdentifyName(name, catalog) ||
+          matchProductsInText(name, catalog)[0] ||
+          null
+        productId = byName?.product_id || productId
+      }
+      if (productId) {
         try {
-          const p = await fetchCatalogProduct(byName.product_id)
+          const p = await fetchCatalogProduct(productId)
           if (p) {
             name = p.name || name
             if (!price) price = Number(p.price) || 0
@@ -78,35 +86,22 @@ export async function enrichQuotationLineItems(
   return out
 }
 
-async function loadThumbBuffer(url: string | undefined): Promise<Buffer | null> {
-  if (!url || !/^https?:\/\//i.test(url)) return null
-  try {
-    const res = await fetch(url, { cache: 'no-store' })
-    if (!res.ok) return null
-    const buf = Buffer.from(await res.arrayBuffer())
-    if (buf.byteLength < 32) return null
-    return sharp(buf)
-      .resize(112, 112, { fit: 'cover' })
-      .jpeg({ quality: 80 })
-      .toBuffer()
-  } catch {
-    return null
-  }
-}
-
 /**
- * Render a QuotationCard-like JPEG (same layout as inbox Create Quotation).
+ * Render QuotationCard matching Tampermonkey `renderQuotationCard`
+ * (#qm-quotation-card): title, item rows with thumbs, Items/Shipping/Total.
+ * Money format matches script: `Rs 1,234`.
  */
 export async function renderQuotationCardPng(
   items: OrderLineItem[],
 ): Promise<Buffer> {
-  const rowH = 72
-  const headerH = 40
-  const footerH = 72
   const pad = 12
-  const height = pad + headerH + items.length * (rowH + 8) + footerH + pad
-  const width = 360
-  const font = 'DejaVu Sans, Arial, sans-serif'
+  const headerH = 36
+  const rowH = 72
+  const thumbSize = 56
+  const footerPad = 78
+  const width = CARD_W
+  const height =
+    pad + headerH + items.length * (rowH + 8) + footerPad + pad
 
   const itemsSubtotal = items.reduce(
     (sum, it) =>
@@ -115,70 +110,75 @@ export async function renderQuotationCardPng(
   )
   const grand = itemsSubtotal + QUOTATION_SHIPPING_LKR
 
-  let y = pad + 22
+  let y = pad + 20
   const parts: string[] = []
   const thumbSlots: Array<{ x: number; y: number; index: number }> = []
 
+  // Head — Tampermonkey uses emoji; Sharp-safe title without emoji
   parts.push(
-    `<text x="${width / 2}" y="${y}" text-anchor="middle" font-family="${font}" font-size="15" font-weight="700" fill="#e9edef">Price Quotation</text>`,
+    `<text x="${width / 2}" y="${y}" text-anchor="middle" font-family="${FONT}" font-size="15" font-weight="700" fill="${FG}">Price Quotation</text>`,
   )
-  y += 18
+  y = pad + headerH
 
   items.forEach((item, idx) => {
     const qty = Math.max(1, Number(item.qty) || 1)
     const price = Number(item.price) || 0
     const line = qty * price
     const top = y
+    const label = `${item.name}${item.color ? ` (${item.color})` : ''}`
+    const nameLines = wrapLines(label, 28, 2)
+
     parts.push(
-      `<rect x="12" y="${top}" width="336" height="${rowH}" rx="8" fill="#111b21" stroke="#2a3942"/>`,
-      `<rect x="20" y="${top + 8}" width="56" height="56" rx="6" fill="#0b141a"/>`,
+      `<rect x="12" y="${top}" width="336" height="${rowH}" rx="8" fill="${ROW_BG}" stroke="${CARD_BORDER}"/>`,
+      `<rect x="20" y="${top + 8}" width="${thumbSize}" height="${thumbSize}" rx="6" fill="${THUMB_BG}"/>`,
+      `<text x="48" y="${top + 40}" text-anchor="middle" font-family="${FONT}" font-size="11" fill="#54656f">—</text>`,
     )
     thumbSlots.push({ x: 20, y: top + 8, index: idx })
 
-    const label = `${item.name}${item.color ? ` (${item.color})` : ''}`
+    let ty = top + 24
+    for (const nl of nameLines) {
+      parts.push(
+        `<text x="88" y="${ty}" font-family="${FONT}" font-size="12" font-weight="600" fill="${FG}">${esc(nl)}</text>`,
+      )
+      ty += 15
+    }
     parts.push(
-      `<text x="88" y="${top + 28}" font-family="${font}" font-size="13" font-weight="600" fill="#e9edef">${esc(label.slice(0, 42))}</text>`,
-      `<text x="88" y="${top + 48}" font-family="${font}" font-size="11" fill="#8696a0">Qty ${qty} x ${esc(formatLkr(price))}</text>`,
-      `<text x="336" y="${top + 40}" text-anchor="end" font-family="${font}" font-size="13" font-weight="700" fill="#e9edef">${esc(formatLkr(line))}</text>`,
+      `<text x="88" y="${top + 58}" font-family="${FONT}" font-size="11" fill="${MUTED}">Qty ${qty} x ${esc(formatQuotationMoneyTm(price))}</text>`,
+      `<text x="336" y="${top + 40}" text-anchor="end" font-family="${FONT}" font-size="13" font-weight="700" fill="${FG}">${esc(formatQuotationMoneyTm(line))}</text>`,
     )
     y += rowH + 8
   })
 
-  y += 4
+  // Totals — Items, Shipping (400), Total with dashed separator like .qm-quot-grand
+  y += 2
   parts.push(
-    `<line x1="12" y1="${y}" x2="348" y2="${y}" stroke="#2a3942" stroke-width="1"/>`,
+    `<line x1="12" y1="${y}" x2="348" y2="${y}" stroke="${CARD_BORDER}" stroke-width="1"/>`,
   )
   y += 18
   parts.push(
-    `<text x="16" y="${y}" font-family="${font}" font-size="12" fill="#cfd7db">Items</text>`,
-    `<text x="344" y="${y}" text-anchor="end" font-family="${font}" font-size="12" fill="#cfd7db">${esc(formatLkr(itemsSubtotal))}</text>`,
+    `<text x="16" y="${y}" font-family="${FONT}" font-size="12" fill="${BODY}">Items</text>`,
+    `<text x="344" y="${y}" text-anchor="end" font-family="${FONT}" font-size="12" fill="${BODY}">${esc(formatQuotationMoneyTm(itemsSubtotal))}</text>`,
   )
   y += 18
   parts.push(
-    `<text x="16" y="${y}" font-family="${font}" font-size="12" fill="#cfd7db">Shipping</text>`,
-    `<text x="344" y="${y}" text-anchor="end" font-family="${font}" font-size="12" fill="#cfd7db">${esc(formatLkr(QUOTATION_SHIPPING_LKR))}</text>`,
+    `<text x="16" y="${y}" font-family="${FONT}" font-size="12" fill="${BODY}">Shipping</text>`,
+    `<text x="344" y="${y}" text-anchor="end" font-family="${FONT}" font-size="12" fill="${BODY}">${esc(formatQuotationMoneyTm(QUOTATION_SHIPPING_LKR))}</text>`,
   )
-  y += 22
+  y += 10
   parts.push(
-    `<text x="16" y="${y}" font-family="${font}" font-size="15" font-weight="700" fill="#e9edef">Total</text>`,
-    `<text x="344" y="${y}" text-anchor="end" font-family="${font}" font-size="15" font-weight="700" fill="#e9edef">${esc(formatLkr(grand))}</text>`,
+    `<line x1="12" y1="${y}" x2="348" y2="${y}" stroke="#3a4a52" stroke-width="1" stroke-dasharray="4 3"/>`,
+  )
+  y += 20
+  parts.push(
+    `<text x="16" y="${y}" font-family="${FONT}" font-size="15" font-weight="700" fill="${FG}">Total</text>`,
+    `<text x="344" y="${y}" text-anchor="end" font-family="${FONT}" font-size="15" font-weight="700" fill="${FG}">${esc(formatQuotationMoneyTm(grand))}</text>`,
   )
 
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
-  <rect width="${width}" height="${height}" rx="8" fill="#182229"/>
-  <rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="8" fill="none" stroke="#2a3942"/>
-  ${parts.join('\n  ')}
-</svg>`
-
-  let base = await sharp(Buffer.from(svg)).png().toBuffer()
-  if (base.byteLength < 500) {
-    throw new Error('Quotation card render produced empty image')
-  }
+  const svg = cardShell(height, parts.join('\n  '))
 
   const composites: Array<{ input: Buffer; left: number; top: number }> = []
   for (const slot of thumbSlots) {
-    const thumb = await loadThumbBuffer(items[slot.index]?.image)
+    const thumb = await loadThumbBuffer(items[slot.index]?.image, thumbSize)
     if (!thumb) continue
     composites.push({
       input: thumb,
@@ -187,15 +187,7 @@ export async function renderQuotationCardPng(
     })
   }
 
-  if (composites.length) {
-    base = await sharp(base).composite(composites).png().toBuffer()
-  }
-
-  const jpeg = await sharp(base).jpeg({ quality: 88, mozjpeg: true }).toBuffer()
-  if (jpeg.byteLength < 500) {
-    throw new Error('Quotation JPEG encode produced empty image')
-  }
-  return jpeg
+  return encodeCardJpeg(svg, composites)
 }
 
 export async function sendQuotationScreenshot(args: {
@@ -233,6 +225,15 @@ export async function sendQuotationScreenshot(args: {
     contextSummary: CONTEXT_BLURBS.quotation,
   })
 
-  console.info('[sales-agent] quotation screenshot sent', debug)
+  console.info('[sales-agent] quotation screenshot sent', {
+    ...debug,
+    items: items.map((i) => ({
+      name: i.name,
+      color: i.color,
+      qty: i.qty,
+      price: i.price,
+      hasImage: Boolean(i.image),
+    })),
+  })
   return debug
 }
