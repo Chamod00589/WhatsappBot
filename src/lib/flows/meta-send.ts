@@ -156,8 +156,16 @@ interface SendMediaEngineArgs {
   conversationId: string
   contactId: string
   kind: MediaKind
-  /** Public URL Meta fetches at send time. */
+  /**
+   * Public URL stored on the message row for the inbox preview.
+   * Also used as Meta `link` when `mediaId` is omitted.
+   */
   link: string
+  /**
+   * Meta media id from `uploadWhatsAppMedia`. Prefer this over link —
+   * Meta often fails to download third-party storage URLs (status → failed).
+   */
+  mediaId?: string
   caption?: string
   /** Document-only; ignored by Meta for image/video. */
   filename?: string
@@ -210,7 +218,9 @@ export async function engineSendMedia(
       accessToken,
       to: phone,
       kind: args.kind,
-      link: args.link,
+      // Prefer uploaded media id — avoids Meta link-fetch failures.
+      id: args.mediaId || undefined,
+      link: args.mediaId ? undefined : args.link,
       caption: args.caption,
       filename: args.filename,
     })
@@ -239,13 +249,8 @@ export async function engineSendMedia(
     await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
   }
 
-  // content_type='image'|'video'|'document' — these are already in the
-  // messages_content_type_check constraint (migration 001 + 010).
-  // content_text carries the caption (or empty) so the conversation
-  // list preview shows something meaningful when the user glances at it.
-  // Persist media_url on insert (same as inbox /api/whatsapp/send) so the
-  // chat bubble can render the image — a post-hoc "latest message" patch
-  // races with other bot sends and leaves MediaUnavailable.
+  // Persist media_url = public link so the inbox can render the image
+  // even when Meta was sent via media id.
   const preview = args.caption?.trim() || `[${args.kind}]`
   const { data: inserted, error: msgErr } = await db
     .from('messages')

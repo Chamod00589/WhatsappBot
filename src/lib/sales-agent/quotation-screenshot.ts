@@ -7,14 +7,16 @@ import {
   QUOTATION_SHIPPING_LKR,
   type OrderLineItem,
 } from '@/lib/orders/constants'
-import { buildMediaPath } from '@/lib/storage/upload-media'
-import { engineSendMedia } from '@/lib/flows/meta-send'
 import {
   loadProductQuickReplies,
   matchProductByIdentifyName,
   matchProductsInText,
 } from './match-products'
 import { CONTEXT_BLURBS } from './types'
+import {
+  sendGeneratedCardImage,
+  type CardMediaDebug,
+} from './send-card-media'
 
 function esc(s: string): string {
   return s
@@ -94,8 +96,6 @@ async function loadThumbBuffer(url: string | undefined): Promise<Buffer | null> 
 
 /**
  * Render a QuotationCard-like JPEG (same layout as inbox Create Quotation).
- * Text is drawn via SVG; product thumbs are composited afterward so we never
- * embed data-URIs in SVG (that path often yields blank / unloadable images).
  */
 export async function renderQuotationCardPng(
   items: OrderLineItem[],
@@ -106,6 +106,7 @@ export async function renderQuotationCardPng(
   const pad = 12
   const height = pad + headerH + items.length * (rowH + 8) + footerH + pad
   const width = 360
+  const font = 'DejaVu Sans, Arial, sans-serif'
 
   const itemsSubtotal = items.reduce(
     (sum, it) =>
@@ -119,7 +120,7 @@ export async function renderQuotationCardPng(
   const thumbSlots: Array<{ x: number; y: number; index: number }> = []
 
   parts.push(
-    `<text x="${width / 2}" y="${y}" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="15" font-weight="700" fill="#e9edef">Price Quotation</text>`,
+    `<text x="${width / 2}" y="${y}" text-anchor="middle" font-family="${font}" font-size="15" font-weight="700" fill="#e9edef">Price Quotation</text>`,
   )
   y += 18
 
@@ -136,9 +137,9 @@ export async function renderQuotationCardPng(
 
     const label = `${item.name}${item.color ? ` (${item.color})` : ''}`
     parts.push(
-      `<text x="88" y="${top + 28}" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="600" fill="#e9edef">${esc(label.slice(0, 42))}</text>`,
-      `<text x="88" y="${top + 48}" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" fill="#8696a0">Qty ${qty} x ${esc(formatLkr(price))}</text>`,
-      `<text x="336" y="${top + 40}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="700" fill="#e9edef">${esc(formatLkr(line))}</text>`,
+      `<text x="88" y="${top + 28}" font-family="${font}" font-size="13" font-weight="600" fill="#e9edef">${esc(label.slice(0, 42))}</text>`,
+      `<text x="88" y="${top + 48}" font-family="${font}" font-size="11" fill="#8696a0">Qty ${qty} x ${esc(formatLkr(price))}</text>`,
+      `<text x="336" y="${top + 40}" text-anchor="end" font-family="${font}" font-size="13" font-weight="700" fill="#e9edef">${esc(formatLkr(line))}</text>`,
     )
     y += rowH + 8
   })
@@ -149,18 +150,18 @@ export async function renderQuotationCardPng(
   )
   y += 18
   parts.push(
-    `<text x="16" y="${y}" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" fill="#cfd7db">Items</text>`,
-    `<text x="344" y="${y}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" fill="#cfd7db">${esc(formatLkr(itemsSubtotal))}</text>`,
+    `<text x="16" y="${y}" font-family="${font}" font-size="12" fill="#cfd7db">Items</text>`,
+    `<text x="344" y="${y}" text-anchor="end" font-family="${font}" font-size="12" fill="#cfd7db">${esc(formatLkr(itemsSubtotal))}</text>`,
   )
   y += 18
   parts.push(
-    `<text x="16" y="${y}" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" fill="#cfd7db">Shipping</text>`,
-    `<text x="344" y="${y}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" fill="#cfd7db">${esc(formatLkr(QUOTATION_SHIPPING_LKR))}</text>`,
+    `<text x="16" y="${y}" font-family="${font}" font-size="12" fill="#cfd7db">Shipping</text>`,
+    `<text x="344" y="${y}" text-anchor="end" font-family="${font}" font-size="12" fill="#cfd7db">${esc(formatLkr(QUOTATION_SHIPPING_LKR))}</text>`,
   )
   y += 22
   parts.push(
-    `<text x="16" y="${y}" font-family="DejaVu Sans, Arial, sans-serif" font-size="15" font-weight="700" fill="#e9edef">Total</text>`,
-    `<text x="344" y="${y}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="15" font-weight="700" fill="#e9edef">${esc(formatLkr(grand))}</text>`,
+    `<text x="16" y="${y}" font-family="${font}" font-size="15" font-weight="700" fill="#e9edef">Total</text>`,
+    `<text x="344" y="${y}" text-anchor="end" font-family="${font}" font-size="15" font-weight="700" fill="#e9edef">${esc(formatLkr(grand))}</text>`,
   )
 
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
@@ -190,7 +191,6 @@ export async function renderQuotationCardPng(
     base = await sharp(base).composite(composites).png().toBuffer()
   }
 
-  // JPEG is more reliable for Meta link-fetch + inbox <img> than sharp SVG PNG quirks
   const jpeg = await sharp(base).jpeg({ quality: 88, mozjpeg: true }).toBuffer()
   if (jpeg.byteLength < 500) {
     throw new Error('Quotation JPEG encode produced empty image')
@@ -206,7 +206,7 @@ export async function sendQuotationScreenshot(args: {
   configOwnerUserId: string
   items: OrderLineItem[]
   caption?: string
-}): Promise<void> {
+}): Promise<CardMediaDebug> {
   const {
     db,
     accountId,
@@ -220,61 +220,19 @@ export async function sendQuotationScreenshot(args: {
   if (!items.length) throw new Error('No quotation items')
 
   const jpeg = await renderQuotationCardPng(items)
-  const path = buildMediaPath(accountId, `quotation-${Date.now()}.jpg`)
-  const { error } = await db.storage.from('chat-media').upload(path, jpeg, {
-    cacheControl: '3600',
-    upsert: false,
-    contentType: 'image/jpeg',
-  })
-  if (error) throw new Error(`Quotation upload failed: ${error.message}`)
-
-  const {
-    data: { publicUrl },
-  } = db.storage.from('chat-media').getPublicUrl(path)
-
-  if (!publicUrl || !/^https?:\/\//i.test(publicUrl)) {
-    throw new Error(`Invalid quotation public URL: ${publicUrl}`)
-  }
-
-  // Verify storage object is fetchable before asking Meta / CRM to show it
-  try {
-    const head = await fetch(publicUrl, { method: 'HEAD', cache: 'no-store' })
-    if (!head.ok) {
-      // Some CDNs reject HEAD — try a tiny GET range
-      const get = await fetch(publicUrl, {
-        cache: 'no-store',
-        headers: { Range: 'bytes=0-64' },
-      })
-      if (!get.ok) {
-        throw new Error(`Uploaded quotation not publicly readable (HTTP ${get.status})`)
-      }
-    }
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('not publicly readable')) {
-      throw err
-    }
-    // Network blip on verify — still try Meta send
-    console.warn('[sales-agent] quotation URL verify skipped:', err)
-  }
-
-  const sent = await engineSendMedia({
+  const debug = await sendGeneratedCardImage({
+    db,
     accountId,
-    userId: configOwnerUserId,
     conversationId,
     contactId,
-    kind: 'image',
-    link: publicUrl,
-    caption: caption?.slice(0, 1024),
-    aiGenerated: true,
+    configOwnerUserId,
+    bytes: jpeg,
+    filename: `quotation-${Date.now()}.jpg`,
+    mimeType: 'image/jpeg',
+    caption,
+    contextSummary: CONTEXT_BLURBS.quotation,
   })
 
-  if (sent.message_id) {
-    await db
-      .from('messages')
-      .update({
-        ai_context_summary: CONTEXT_BLURBS.quotation,
-        media_url: publicUrl,
-      })
-      .eq('id', sent.message_id)
-  }
+  console.info('[sales-agent] quotation screenshot sent', debug)
+  return debug
 }

@@ -172,7 +172,7 @@ export async function actionCreateOrder(args: {
   }
 
   try {
-    await sendOrderConfirmScreenshot({
+    const shot = await sendOrderConfirmScreenshot({
       db,
       accountId,
       conversationId,
@@ -180,8 +180,14 @@ export async function actionCreateOrder(args: {
       configOwnerUserId,
       order,
     })
+    await addNamedTag(db, accountId, contactId, 'Pending')
+    return {
+      ok: true,
+      message: `Order created ${formatOrderLabelBarcode(String(order.id || ''))}; screenshot ${shot.sendMode} ${Math.round(shot.bytes / 1024)}kb meta=${shot.metaMediaId || 'none'} url=${shot.publicUrl}`,
+    }
   } catch (err) {
     console.error('[sales-agent] order screenshot send failed:', err)
+    const errMsg = err instanceof Error ? err.message : String(err)
     // Fallback: short Singlish/Tanglish text so customer still gets a confirm ask
     const trackId = formatOrderLabelBarcode(String(order.id || ''))
     const total = Math.round(numSafe(order.total_amount) || itemsTotal)
@@ -196,13 +202,11 @@ export async function actionCreateOrder(args: {
       aiGenerated: true,
     })
     await stampSummary(db, conversationId, CONTEXT_BLURBS.orderConfirm)
-  }
-
-  await addNamedTag(db, accountId, contactId, 'Pending')
-
-  return {
-    ok: true,
-    message: `Order created ${formatOrderLabelBarcode(String(order.id || ''))}`,
+    await addNamedTag(db, accountId, contactId, 'Pending')
+    return {
+      ok: true,
+      message: `Order created ${formatOrderLabelBarcode(String(order.id || ''))}; screenshot FAILED (${errMsg}) — sent text fallback`,
+    }
   }
 }
 
@@ -309,7 +313,7 @@ export async function actionSendQuotation(args: {
   const enriched = await enrichQuotationLineItems(db, accountId, items)
 
   try {
-    await sendQuotationScreenshot({
+    const shot = await sendQuotationScreenshot({
       db,
       accountId,
       conversationId,
@@ -318,9 +322,13 @@ export async function actionSendQuotation(args: {
       items: enriched,
       caption,
     })
-    return { ok: true, message: 'Quotation screenshot sent' }
+    return {
+      ok: true,
+      message: `Quotation screenshot sent (${shot.sendMode}, ${Math.round(shot.bytes / 1024)}kb, meta=${shot.metaMediaId || 'none'}, url=${shot.publicUrl})`,
+    }
   } catch (err) {
     console.error('[sales-agent] quotation screenshot failed:', err)
+    const errMsg = err instanceof Error ? err.message : String(err)
     // Fallback: text quotation (same numbers)
     const lines: string[] = ['*Price Quotation*', '']
     let sub = 0
@@ -344,7 +352,10 @@ export async function actionSendQuotation(args: {
       aiGenerated: true,
     })
     await stampSummary(db, conversationId, CONTEXT_BLURBS.quotation)
-    return { ok: true, message: 'Quotation text sent (screenshot failed)' }
+    return {
+      ok: true,
+      message: `Quotation text sent (screenshot failed: ${errMsg})`,
+    }
   }
 }
 

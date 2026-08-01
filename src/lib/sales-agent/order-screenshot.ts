@@ -8,9 +8,11 @@ import {
   buildOrderScreenshotCaption,
 } from '@/lib/orders/constants'
 import { catalogBaseUrl } from '@/lib/catalog/products'
-import { buildMediaPath } from '@/lib/storage/upload-media'
-import { engineSendMedia } from '@/lib/flows/meta-send'
 import { CONTEXT_BLURBS } from './types'
+import {
+  sendGeneratedCardImage,
+  type CardMediaDebug,
+} from './send-card-media'
 
 type OrderLike = Record<string, unknown>
 
@@ -28,13 +30,12 @@ function esc(s: string): string {
 }
 
 /**
- * Render an OrderCard-like PNG (same dark WhatsApp-style card as inbox
- * Create Order screenshot) using sharp + SVG.
+ * Render an OrderCard-like JPEG (WhatsApp-dark card) via sharp + SVG.
  */
-export async function renderOrderCardPng(order: OrderLike): Promise<Buffer> {
+export async function renderOrderCardJpeg(order: OrderLike): Promise<Buffer> {
   const items = Array.isArray(order.items) ? (order.items as OrderLike[]) : []
   const itemsTotal = items.reduce(
-    (sum, it) => sum + num(it.price) * num(it.quantity),
+    (sum, it) => sum + num(it.price) * num(it.quantity ?? it.qty),
     0,
   )
   const courierCharge = num(order.courier_charge ?? order.shipping_cost)
@@ -56,9 +57,9 @@ export async function renderOrderCardPng(order: OrderLike): Promise<Buffer> {
     typeof order.id === 'string' ? order.id : null,
   )
   const created = order.created_at
-    ? new Date(String(order.created_at)).toLocaleString()
+    ? new Date(String(order.created_at)).toLocaleString('en-LK')
     : ''
-  const fullName = String(order.full_name || order.customer_name || '—')
+  const fullName = String(order.full_name || order.customer_name || '-')
   const address = String(order.address || '')
   const mobile1 = String(order.mobile_1 || order.phone || '')
   const mobile2 = String(order.mobile_2 || order.phone2 || '')
@@ -75,80 +76,79 @@ export async function renderOrderCardPng(order: OrderLike): Promise<Buffer> {
     rows.push(line.replace(/\{\{Y\}\}/g, String(y)))
     y += dy
   }
+  const font = 'DejaVu Sans, Arial, sans-serif'
 
   push(
-    `<text x="16" y="{{Y}}" font-family="ui-monospace,monospace" font-size="11" fill="#8696a0">${esc(labelId)}</text>`,
+    `<text x="16" y="{{Y}}" font-family="monospace" font-size="11" fill="#8696a0">${esc(labelId)}</text>`,
     16,
   )
   if (created) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="11" fill="#8696a0">${esc(created)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#8696a0">${esc(created)}</text>`,
       16,
     )
   }
   push(
-    `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="11" fill="#e9edef">${esc(statusLabel)} · Retail · ${esc(shipLabel)}</text>`,
+    `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#e9edef">${esc(statusLabel)} · Retail · ${esc(shipLabel)}</text>`,
     26,
   )
 
   push(
-    `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="11" fill="#8696a0">CUSTOMER</text>`,
+    `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#8696a0">CUSTOMER</text>`,
     18,
   )
   push(
-    `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="14" font-weight="700" fill="#e9edef">${esc(fullName)}</text>`,
+    `<text x="16" y="{{Y}}" font-family="${font}" font-size="14" font-weight="700" fill="#e9edef">${esc(fullName)}</text>`,
     20,
   )
-  // No emoji in SVG text — Sharp/librsvg often fails to rasterize them,
-  // which made Meta send fail and fell back to text-only confirm.
   addressLines.forEach((line) => {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(line)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" fill="#cfd7db">${esc(line)}</text>`,
       18,
     )
   })
   if (mobile1) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(mobile1)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" fill="#cfd7db">${esc(mobile1)}</text>`,
       18,
     )
   }
   if (mobile2) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(mobile2)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" fill="#cfd7db">${esc(mobile2)}</text>`,
       18,
     )
   }
   if (city) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" fill="#cfd7db">${esc(city)}</text>`,
+      `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" fill="#cfd7db">${esc(city)}</text>`,
       22,
     )
   }
 
   push(
-    `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="11" fill="#8696a0">ITEMS</text>`,
+    `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#8696a0">ITEMS</text>`,
     20,
   )
 
   if (!items.length) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="12" fill="#8696a0">No items</text>`,
+      `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">No items</text>`,
       20,
     )
   } else {
     for (const it of items) {
-      const qty = num(it.quantity)
+      const qty = num(it.quantity ?? it.qty)
       const price = num(it.price)
       const lineTotal = qty * price
       const name = String(it.name || 'Item')
       const color = it.color ? ` (${String(it.color)})` : ''
       push(
-        `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="13" font-weight="600" fill="#e9edef">${esc(name + color)}</text>`,
+        `<text x="16" y="{{Y}}" font-family="${font}" font-size="13" font-weight="600" fill="#e9edef">${esc(name + color)}</text>`,
         16,
       )
       push(
-        `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="11" fill="#8696a0">Qty ${qty} × ${esc(formatOrderMoney(price))}   ${esc(formatOrderMoney(lineTotal))}</text>`,
+        `<text x="16" y="{{Y}}" font-family="${font}" font-size="11" fill="#8696a0">Qty ${qty} x ${esc(formatOrderMoney(price))}   ${esc(formatOrderMoney(lineTotal))}</text>`,
         22,
       )
     }
@@ -160,26 +160,26 @@ export async function renderOrderCardPng(order: OrderLike): Promise<Buffer> {
     18,
   )
   push(
-    `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="12" fill="#8696a0">Items</text><text x="344" y="{{Y}}" text-anchor="end" font-family="sans-serif" font-size="12" fill="#8696a0">${esc(formatOrderMoney(itemsTotal))}</text>`,
+    `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">Items</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="12" fill="#8696a0">${esc(formatOrderMoney(itemsTotal))}</text>`,
     18,
   )
   push(
-    `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="12" fill="#8696a0">${esc(shipLabel)}</text><text x="344" y="{{Y}}" text-anchor="end" font-family="sans-serif" font-size="12" fill="#8696a0">${esc(formatOrderMoney(courierCharge))}</text>`,
+    `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">${esc(shipLabel)}</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="12" fill="#8696a0">${esc(formatOrderMoney(courierCharge))}</text>`,
     18,
   )
   if (showPayment) {
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="12" fill="#8696a0">Order total</text><text x="344" y="{{Y}}" text-anchor="end" font-family="sans-serif" font-size="12" fill="#8696a0">${esc(formatOrderMoney(totalAmount))}</text>`,
+      `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">Order total</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="12" fill="#8696a0">${esc(formatOrderMoney(totalAmount))}</text>`,
       18,
     )
     push(
-      `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="12" fill="#8696a0">Paid</text><text x="344" y="{{Y}}" text-anchor="end" font-family="sans-serif" font-size="12" fill="#8696a0">${esc(formatOrderMoney(amountPaid))}</text>`,
+      `<text x="16" y="{{Y}}" font-family="${font}" font-size="12" fill="#8696a0">Paid</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="12" fill="#8696a0">${esc(formatOrderMoney(amountPaid))}</text>`,
       18,
     )
   }
   const totalShow = showPayment ? remaining : totalAmount
   push(
-    `<text x="16" y="{{Y}}" font-family="sans-serif" font-size="14" font-weight="700" fill="#e9edef">Total</text><text x="344" y="{{Y}}" text-anchor="end" font-family="sans-serif" font-size="14" font-weight="700" fill="#e9edef">${esc(formatOrderMoney(totalShow))}</text>`,
+    `<text x="16" y="{{Y}}" font-family="${font}" font-size="14" font-weight="700" fill="#e9edef">Total</text><text x="344" y="{{Y}}" text-anchor="end" font-family="${font}" font-size="14" font-weight="700" fill="#e9edef">${esc(formatOrderMoney(totalShow))}</text>`,
     24,
   )
 
@@ -191,25 +191,18 @@ export async function renderOrderCardPng(order: OrderLike): Promise<Buffer> {
   ${rows.join('\n  ')}
 </svg>`
 
-  return sharp(Buffer.from(svg)).png().toBuffer()
+  const jpeg = await sharp(Buffer.from(svg))
+    .jpeg({ quality: 88, mozjpeg: true })
+    .toBuffer()
+  if (jpeg.byteLength < 500) {
+    throw new Error(`Order card JPEG too small (${jpeg.byteLength} bytes)`)
+  }
+  return jpeg
 }
 
-export async function uploadOrderScreenshotAdmin(
-  db: SupabaseClient,
-  accountId: string,
-  png: Buffer,
-): Promise<{ publicUrl: string; path: string }> {
-  const path = buildMediaPath(accountId, `order-${Date.now()}.png`)
-  const { error } = await db.storage.from('chat-media').upload(path, png, {
-    cacheControl: '3600',
-    upsert: false,
-    contentType: 'image/png',
-  })
-  if (error) throw new Error(`Screenshot upload failed: ${error.message}`)
-  const {
-    data: { publicUrl },
-  } = db.storage.from('chat-media').getPublicUrl(path)
-  return { publicUrl, path }
+/** @deprecated use renderOrderCardJpeg */
+export async function renderOrderCardPng(order: OrderLike): Promise<Buffer> {
+  return renderOrderCardJpeg(order)
 }
 
 /**
@@ -223,15 +216,14 @@ export async function sendOrderConfirmScreenshot(args: {
   contactId: string
   configOwnerUserId: string
   order: OrderLike
-}): Promise<void> {
+}): Promise<CardMediaDebug> {
   const { db, accountId, conversationId, contactId, configOwnerUserId, order } =
     args
 
-  const png = await renderOrderCardPng(order)
-  const { publicUrl } = await uploadOrderScreenshotAdmin(db, accountId, png)
+  const jpeg = await renderOrderCardJpeg(order)
   const items = Array.isArray(order.items) ? (order.items as OrderLike[]) : []
   const itemsTotal = items.reduce(
-    (sum, it) => sum + num(it.price) * num(it.quantity),
+    (sum, it) => sum + num(it.price) * num(it.quantity ?? it.qty),
     0,
   )
   const captionTotal =
@@ -245,21 +237,19 @@ export async function sendOrderConfirmScreenshot(args: {
     catalogBaseUrl(),
   )
 
-  const sent = await engineSendMedia({
+  const debug = await sendGeneratedCardImage({
+    db,
     accountId,
-    userId: configOwnerUserId,
     conversationId,
     contactId,
-    kind: 'image',
-    link: publicUrl,
+    configOwnerUserId,
+    bytes: jpeg,
+    filename: `order-${Date.now()}.jpg`,
+    mimeType: 'image/jpeg',
     caption,
-    aiGenerated: true,
+    contextSummary: CONTEXT_BLURBS.orderConfirm,
   })
 
-  if (sent.message_id) {
-    await db
-      .from('messages')
-      .update({ ai_context_summary: CONTEXT_BLURBS.orderConfirm })
-      .eq('id', sent.message_id)
-  }
+  console.info('[sales-agent] order screenshot sent', debug)
+  return debug
 }
