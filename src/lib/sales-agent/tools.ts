@@ -115,14 +115,22 @@ export function buildSalesAgentTools(caps: AiConfigWithSales) {
       type: 'function',
       function: {
         name: 'edit_order',
-        description: 'Update fields on an existing ladiesbags order.',
+        description:
+          'Update an existing ladiesbags order after it was created — e.g. change item color, qty, address, or notes. Use when the customer asks to change the order (color eka white karanna, venas karanna, etc.). Do not send a quick reply for that.',
         parameters: {
           type: 'object',
           properties: {
-            order_id: { type: 'string' },
-            patch: { type: 'object' },
+            order_id: {
+              type: 'string',
+              description: 'Order UUID when known; otherwise latest order for the chat phone is used server-side if omitted in follow-ups.',
+            },
+            patch: {
+              type: 'object',
+              description:
+                'Fields to update. For color change include items: [{ name, color, quantity, price, productId }].',
+            },
           },
-          required: ['order_id', 'patch'],
+          required: ['patch'],
         },
       },
     })

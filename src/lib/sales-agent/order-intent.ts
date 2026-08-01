@@ -459,6 +459,8 @@ export async function loadRecentCustomerTexts(
 /**
  * Products we already offered (sent QR) in this chat — used when the
  * customer later pastes only an address without repeating the bag name.
+ * Prefers identify / explicit "sent product quick reply" summaries over
+ * loose title substring matches in old message bodies.
  */
 export async function loadRecentlyOfferedProducts(
   db: SupabaseClient,
@@ -474,41 +476,69 @@ export async function loadRecentlyOfferedProducts(
     .order('created_at', { ascending: false })
     .limit(limit)
 
-  const blob = ((data ?? []) as Array<{
+  const rows = (data ?? []) as Array<{
     content_text: string | null
     ai_context_summary: string | null
-  }>)
+  }>
+
+  const strongBlob = rows
+    .map((m) => (m.ai_context_summary || '').toLowerCase())
+    .join('\n')
+  const weakBlob = rows
     .map((m) => `${m.content_text || ''}\n${m.ai_context_summary || ''}`)
     .join('\n')
     .toLowerCase()
 
   const offered: MatchableQuickReply[] = []
   const seen = new Set<string>()
-  for (const p of catalog) {
+
+  const tryPush = (p: MatchableQuickReply) => {
     const key = p.catalog_message_id || p.id
-    if (seen.has(key)) continue
+    if (seen.has(key)) return
+    seen.add(key)
+    offered.push(p)
+  }
+
+  // Pass 1: strong signals from identify / product QR context summaries
+  for (const p of catalog) {
     const title = productDisplayName(p.title).toLowerCase()
-    const stub = (p.title || '').toLowerCase()
     const catalogId = (p.catalog_message_id || '').toLowerCase()
     const hit =
-      (catalogId && blob.includes(catalogId)) ||
-      (title &&
-        title.length >= 4 &&
-        (blob.includes(`sent product quick reply: ${title}`) ||
-          blob.includes(`sent product quick reply for ${title}`) ||
-          blob.includes(stub) ||
-          blob.includes(title)))
-    if (hit) {
-      seen.add(key)
-      offered.push(p)
+      (catalogId && strongBlob.includes(catalogId)) ||
+      (title.length >= 4 &&
+        (strongBlob.includes(`sent product quick reply for ${title}`) ||
+          strongBlob.includes(`sent product quick reply: ${title}`) ||
+          (strongBlob.includes('after image identify') &&
+            strongBlob.includes(title.split(' ')[0] || '')) ||
+          strongBlob.includes(
+            `confirmed identify: ${title.split(' ')[0] || ''}`,
+          )))
+    if (hit) tryPush(p)
+  }
+
+  // Pass 2: only if nothing found — looser title match on summaries (not body text)
+  if (!offered.length) {
+    for (const p of catalog) {
+      const title = productDisplayName(p.title).toLowerCase()
+      if (
+        title.length >= 5 &&
+        (strongBlob.includes(title) ||
+          weakBlob.includes(`sent product quick reply`))
+      ) {
+        if (strongBlob.includes(title) || weakBlob.includes(title)) tryPush(p)
+      }
     }
   }
+
   return offered
 }
 
 /**
  * Resolve bag/color/qty for an address message from recent customer text
- * and/or products we already sent as QRs.
+ * and/or products we already sent as QRs (identify / product match).
+ *
+ * Prefer recently offered (identified) bags over older bag-name mentions
+ * in chat history when the address message itself does not name a product.
  */
 export function resolveOrderIntentsForAddress(args: {
   customerTexts: string[]
@@ -516,23 +546,37 @@ export function resolveOrderIntentsForAddress(args: {
   offeredProducts: MatchableQuickReply[]
 }): BagOrderIntent[] {
   const { customerTexts, catalog, offeredProducts } = args
-  const fromText = extractOrderIntents(customerTexts, catalog)
-  if (fromText.length) return fromText
+  const addressText = customerTexts[0] || ''
+  const priorTexts = customerTexts.slice(1)
 
-  if (!offeredProducts.length) return []
+  const fromAddress = extractOrderIntents(
+    addressText ? [addressText] : [],
+    catalog,
+  )
+  if (fromAddress.length) return fromAddress
 
-  const merged = customerTexts.filter(Boolean).join('\n')
-  const colors = extractColorsFromText(merged)
-  const qty = extractQty(merged)
+  const mergedPrior = priorTexts.filter(Boolean).join('\n')
+  const colors = extractColorsFromText(
+    [addressText, mergedPrior].filter(Boolean).join('\n'),
+  )
+  const qty = extractQty(mergedPrior || addressText)
 
-  return offeredProducts.map((p, i) => ({
-    productId: p.product_id,
-    catalogMessageId: p.catalog_message_id,
-    name: productDisplayName(p.title),
-    color: colors[i] || (colors.length === 1 ? colors[0] : null),
-    qty,
-    quickReplyId: p.id,
-  }))
+  // Prefer offered (identify QR) over older text matches
+  if (offeredProducts.length) {
+    return offeredProducts.map((p, i) => ({
+      productId: p.product_id,
+      catalogMessageId: p.catalog_message_id,
+      name: productDisplayName(p.title),
+      color: colors[i] || (colors.length === 1 ? colors[0] : null),
+      qty,
+      quickReplyId: p.id,
+    }))
+  }
+
+  const fromPrior = extractOrderIntents(priorTexts, catalog)
+  if (fromPrior.length) return fromPrior
+
+  return []
 }
 
 export function buildColorAskText(

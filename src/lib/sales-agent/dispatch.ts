@@ -45,6 +45,11 @@ import {
   actionSendQuotation,
   actionMarkHuman,
 } from './actions/orders'
+import {
+  actionEditOrderColor,
+  extractEditColor,
+  isOrderEditRequest,
+} from './order-edit-intent'
 import { runSalesAgentToolLoop } from './tool-loop'
 import { SalesAgentRunLogger } from './debug-log'
 import { engineSendText } from '@/lib/flows/meta-send'
@@ -732,6 +737,50 @@ export async function dispatchSalesAgentNow(
       return
     }
 
+    // 3b) After an order exists — color/bag change → edit order (not FAQ / White bags QR)
+    if (
+      config.editOrder &&
+      inboundText &&
+      contactPhone &&
+      isOrderEditRequest(inboundText) &&
+      !isAddressLikeMessage(inboundText)
+    ) {
+      const newColor = extractEditColor(inboundText)
+      log.step('edit_order', 'Order edit intent detected', {
+        newColor,
+        text: inboundText.slice(0, 120),
+      })
+      if (newColor) {
+        const r = await actionEditOrderColor({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          configOwnerUserId,
+          contactPhone,
+          newColor,
+          useSinglish,
+        })
+        log.step(
+          'edit_order',
+          r.ok ? r.message : `Edit failed: ${r.message}`,
+        )
+        if (r.ok) {
+          await rememberAnsweredQuestion(db, conversationId, inboundText)
+          await claimSlot(
+            db,
+            conversationId,
+            config.autoReplyMaxPerConversation,
+          )
+          await log.complete()
+          return
+        }
+      } else if (config.aiText) {
+        // Let AI tools call edit_order with a fuller patch
+        log.step('edit_order', 'Edit intent without clear color — continuing to AI tools')
+      }
+    }
+
     // 4) Image identify — all images in the burst (not only the last one)
     if (config.identify && inboundImages.length > 0) {
       log.step(
@@ -783,7 +832,12 @@ export async function dispatchSalesAgentNow(
     }
 
     // 5) Product name match → send each relevant product QR (skip already sent)
-    if (config.productMatch && inboundText && !isAddressLikeMessage(inboundText)) {
+    if (
+      config.productMatch &&
+      inboundText &&
+      !isAddressLikeMessage(inboundText) &&
+      !isOrderEditRequest(inboundText)
+    ) {
       const hits = matchProductsInText(inboundText, products)
       const freshHits = hits.filter((h) => {
         const key = h.catalog_message_id || h.id
@@ -858,11 +912,16 @@ export async function dispatchSalesAgentNow(
       }
     }
 
-    // 6) Custom / other QR (non-product questions)
-    if (config.customQrMatch && inboundText && !handled) {
+    // 6) Custom / other QR — match customer question to QR **description**
+    if (
+      config.customQrMatch &&
+      inboundText &&
+      !handled &&
+      !isOrderEditRequest(inboundText)
+    ) {
       const customs = await loadCustomQuickReplies(db, accountId)
       const matches = matchCustomQuickReplies(inboundText, customs, {
-        minScore: 0.4,
+        minScore: 0.5,
       })
       const best = matches[0]
       log.set({
@@ -870,10 +929,10 @@ export async function dispatchSalesAgentNow(
           ? { title: best.qr.title, score: best.score }
           : null,
       })
-      if (best && best.score >= 0.45) {
+      if (best && best.score >= 0.55) {
         log.step(
           'custom_qr',
-          `Matched custom QR "${best.qr.title}" score=${best.score.toFixed(2)}`,
+          `Matched custom QR "${best.qr.title}" score=${best.score.toFixed(2)} via description`,
         )
         try {
           if (best.qr.catalog_message_id) {

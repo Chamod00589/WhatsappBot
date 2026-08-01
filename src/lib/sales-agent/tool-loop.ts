@@ -91,10 +91,11 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
 
   const parts = [
     'You are the Ladies Bags WhatsApp sales agent for ladiesbags.lk.',
-    'ALWAYS answer using saved quick replies via send_quick_reply (product QRs for bag questions, other/custom QRs for policies, delivery, payments, etc.).',
+    'ALWAYS answer using saved quick replies via send_quick_reply when the customer asks a FAQ/policy question. Match against each quick reply DESCRIPTION (what the reply covers), not just the title.',
     'Never invent product details, prices, or policies in free text. Do not send a plain chat reply to answer the customer.',
     'If none of the listed quick replies are suitable for the customer question, call mark_human with a short reason so a human can reply manually.',
     'When the customer asks for price / quotation (e.g. "price kohomada", "kochchara"), call send_quotation with the bags instead of inventing prices.',
+    'After an order was created, if the customer asks to change bag color / qty / address, call edit_order (do NOT send a product or "White bags" style quick reply).',
     'Use create_order / send_tracking / edit_order only when clearly needed from the conversation.',
     languageHintForPrompt(replyMode),
     'Keep any tool-side reasons short. Do not repeat an answer the customer already received.',
@@ -103,7 +104,7 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
       ? `Business context:\n${config.systemPrompt.trim()}`
       : '',
     qrList
-      ? `Available quick replies (MUST use send_quick_reply when answering):\n${qrList}`
+      ? `Available quick replies (match DESCRIPTION to the customer question, then send_quick_reply):\n${qrList}`
       : 'No quick replies configured — call mark_human.',
   ]
   return parts.filter(Boolean).join('\n\n')
@@ -472,16 +473,56 @@ async function executeToolCall(
       return { replied: r.ok, handoff: false, note: r.message }
     }
     case 'edit_order': {
-      const orderId = typeof a.order_id === 'string' ? a.order_id : ''
+      let orderId = typeof a.order_id === 'string' ? a.order_id : ''
       const patch =
         a.patch && typeof a.patch === 'object'
           ? (a.patch as Record<string, unknown>)
           : {}
+
+      // Resolve latest order for this chat when model omits order_id
+      if (!orderId && args.contactPhone) {
+        try {
+          const { fetchOrderByPhone } = await import(
+            '@/lib/orders/ladiesbags-orders'
+          )
+          const fresh = (await fetchOrderByPhone({
+            phone: args.contactPhone,
+            days: 7,
+            whatsappOnly: false,
+          })) as { order?: { id?: string } }
+          if (fresh?.order?.id) orderId = String(fresh.order.id)
+        } catch {
+          /* ignore */
+        }
+      }
+
+      // Color-only patch convenience
+      const colorHint =
+        typeof patch.color === 'string'
+          ? patch.color
+          : typeof (patch as { new_color?: string }).new_color === 'string'
+            ? (patch as { new_color: string }).new_color
+            : null
+      if (colorHint && args.contactPhone && !patch.items) {
+        const { actionEditOrderColor } = await import('./order-edit-intent')
+        const r = await actionEditOrderColor({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          configOwnerUserId,
+          contactPhone: args.contactPhone,
+          newColor: colorHint,
+          useSinglish: args.useSinglish,
+        })
+        return { replied: r.ok, handoff: false, note: r.message }
+      }
+
       if (!orderId) {
         return { replied: false, handoff: false, note: 'missing order_id' }
       }
       const r = await actionEditOrder({ orderId, patch })
-      return { replied: false, handoff: false, note: r.message }
+      return { replied: r.ok, handoff: false, note: r.message }
     }
     case 'mark_human': {
       await actionMarkHuman({

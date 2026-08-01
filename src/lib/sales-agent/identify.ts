@@ -1,6 +1,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { identifyBag, type BagMatch } from '@/lib/bagIdentify'
-import { fetchCatalogQuickMessage } from '@/lib/catalog/products'
+import {
+  fetchCatalogProduct,
+  fetchCatalogQuickMessage,
+} from '@/lib/catalog/products'
+import { catalogImageForColor } from '@/lib/orders/catalog-helpers'
 import { engineSendMedia } from '@/lib/flows/meta-send'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { decrypt } from '@/lib/whatsapp/encryption'
@@ -13,9 +17,11 @@ import {
 import {
   loadProductQuickReplies,
   matchProductByIdentifyName,
+  type MatchableQuickReply,
 } from './match-products'
 import { sendQuickReplyByCatalogId } from './send-quick-reply'
 import { identifyRejectText, identifyConfirmAskText } from './identify-text'
+import type { OrderPendingQuotedItem } from './order-intent'
 
 export { identifyRejectText } from './identify-text'
 
@@ -160,6 +166,7 @@ export async function handleInboundIdentifyMany(args: {
     color: string
     confidence: number
   }> = []
+  const quotedItems: OrderPendingQuotedItem[] = []
   const sentCatalogIds = new Set<string>()
   let qrCount = 0
   const needsConfirm: Array<{
@@ -210,6 +217,8 @@ export async function handleInboundIdentifyMany(args: {
           contextSummary: `Sent product quick reply for ${best.product} (${best.color}) after image identify ${best.confidence.toFixed(0)}%`,
         })
         qrCount += 1
+        const line = await buildQuotedItemFromIdentify(best, qr)
+        if (line) quotedItems.push(line)
       } catch (err) {
         console.error('[sales-agent] identify QR send failed:', err)
       }
@@ -227,6 +236,9 @@ export async function handleInboundIdentifyMany(args: {
 
   if (qrCount > 0) {
     await clearIdentifyPending(db, conversationId)
+    if (quotedItems.length) {
+      await saveAwaitingAddressFromIdentify(db, conversationId, quotedItems)
+    }
     return { handled: true, sentQr: true, qrCount, identified }
   }
 
@@ -363,7 +375,72 @@ export async function resolveIdentifyConfirm(args: {
       contextSummary: `Confirmed identify: ${pending.product} / ${pending.color}`,
     })
   }
+
+  const catalog = await loadProductQuickReplies(db, accountId)
+  const qr = matchProductByIdentifyName(pending.product, catalog)
+  if (qr) {
+    const line = await buildQuotedItemFromIdentify(
+      {
+        product: pending.product,
+        color: pending.color,
+        confidence: pending.confidence,
+      },
+      qr,
+    )
+    if (line) {
+      await saveAwaitingAddressFromIdentify(db, conversationId, [line])
+    }
+  }
   return { handled: true }
+}
+
+async function buildQuotedItemFromIdentify(
+  best: { product: string; color: string; confidence?: number },
+  qr: MatchableQuickReply,
+): Promise<OrderPendingQuotedItem | null> {
+  const productId = qr.product_id || undefined
+  let name = best.product
+  let price = 0
+  let image: string | undefined
+  if (productId) {
+    try {
+      const p = await fetchCatalogProduct(productId)
+      if (p) {
+        name = p.name || name
+        price = p.price || 0
+        image = catalogImageForColor(p, best.color || p.colors[0] || '')
+      }
+    } catch {
+      /* keep identify name */
+    }
+  }
+  return {
+    productId,
+    name,
+    color: best.color || '',
+    qty: 1,
+    price,
+    image,
+  }
+}
+
+/** Remember identified bags so a follow-up address creates the correct order. */
+async function saveAwaitingAddressFromIdentify(
+  db: SupabaseClient,
+  conversationId: string,
+  items: OrderPendingQuotedItem[],
+): Promise<void> {
+  if (!items.length) return
+  await db
+    .from('conversations')
+    .update({
+      sa_order_pending: {
+        type: 'awaiting_address',
+        items,
+        askedAt: new Date().toISOString(),
+      },
+    })
+    .eq('id', conversationId)
 }
 
 async function clearIdentifyPending(
