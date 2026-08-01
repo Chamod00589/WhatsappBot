@@ -42,6 +42,7 @@ import {
   isAddressLikeMessage,
   actionCreateOrder,
   actionSendQuotation,
+  actionMarkHuman,
 } from './actions/orders'
 import { runSalesAgentToolLoop } from './tool-loop'
 import { SalesAgentRunLogger } from './debug-log'
@@ -94,6 +95,7 @@ export async function dispatchSalesAgentNow(
     mediaUrl,
     metaMediaId,
     inboundImages: inboundImagesArg,
+    isFirstInboundMessage,
   } = args
 
   const inboundImages =
@@ -117,6 +119,7 @@ export async function dispatchSalesAgentNow(
     hasMedia: Boolean(mediaUrl || metaMediaId),
     metaMediaId: metaMediaId || null,
     burstLines: (rawInbound || '').split('\n').filter((l) => l.trim()).length,
+    firstInbound: Boolean(isFirstInboundMessage),
   })
 
   try {
@@ -562,7 +565,7 @@ export async function dispatchSalesAgentNow(
       }
     }
 
-    // 5) Product name match → send product QRs (skip already sent)
+    // 5) Product name match → send each relevant product QR (skip already sent)
     if (config.productMatch && inboundText && !isAddressLikeMessage(inboundText)) {
       const hits = matchProductsInText(inboundText, products)
       const freshHits = hits.filter((h) => {
@@ -588,14 +591,14 @@ export async function dispatchSalesAgentNow(
       log.step(
         'product_match',
         freshHits.length
-          ? `Matched ${freshHits.length} new product(s)`
+          ? `Matched ${freshHits.length} product QR(s)${isFirstInboundMessage ? ' (first inbound)' : ''}`
           : hits.length
             ? 'Product named but QR already sent — not resending'
             : 'No product name match',
         { titles: freshHits.map((h) => h.title) },
       )
       if (freshHits.length > 0) {
-        for (const hit of freshHits.slice(0, 5)) {
+        for (const hit of freshHits.slice(0, 8)) {
           if (!hit.catalog_message_id) continue
           try {
             await sendQuickReplyByCatalogId({
@@ -618,8 +621,6 @@ export async function dispatchSalesAgentNow(
           }
         }
       } else if (hits.length > 0 && skipped.length > 0) {
-        // Customer asked about a bag we already sent details for — don't resend.
-        // If they also included color (buying intent without address), nudge address format.
         const intents = extractOrderIntents([inboundText], products)
         const withColor = intents.filter((i) => i.color)
         if (withColor.length && config.createOrder) {
@@ -638,7 +639,7 @@ export async function dispatchSalesAgentNow(
       }
     }
 
-    // 6) Custom QR description match
+    // 6) Custom / other QR (non-product questions)
     if (config.customQrMatch && inboundText && !handled) {
       const customs = await loadCustomQuickReplies(db, accountId)
       const matches = matchCustomQuickReplies(inboundText, customs, {
@@ -697,7 +698,7 @@ export async function dispatchSalesAgentNow(
       }
       await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
       if (!(config.aiText && inboundText && isAddressLikeMessage(inboundText))) {
-        log.step('done', 'Deterministic layer handled — skipping AI tools')
+        log.step('done', 'Quick reply layer handled — skipping AI free-text')
         await log.complete()
         return
       }
@@ -707,9 +708,23 @@ export async function dispatchSalesAgentNow(
       )
     }
 
-    // 7) AI tool layer
+    // 7) AI picks QRs only; if none fit → Human for manual reply
     if (!config.aiText) {
-      log.step('ai_tools', 'AI text/tools capability off — stop')
+      if (!handled && (inboundText.trim() || contentType === 'image')) {
+        await actionMarkHuman({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          reason: 'No suitable quick reply matched; AI text off',
+        })
+        log.step(
+          'handoff',
+          'No QR match + AI off — tagged Human for manual reply',
+        )
+      } else {
+        log.step('ai_tools', 'AI text/tools capability off — stop')
+      }
       await log.complete()
       return
     }
@@ -773,9 +788,9 @@ export async function dispatchSalesAgentNow(
     log.step(
       'ai_result',
       result.handoff
-        ? 'Model requested handoff'
+        ? 'Model requested handoff / no suitable QR'
         : result.replied
-          ? 'AI replied / ran tools'
+          ? 'AI sent quick reply / ran tools'
           : 'AI produced no reply',
       {
         replied: result.replied,
@@ -793,7 +808,7 @@ export async function dispatchSalesAgentNow(
       usage: result.usage,
     })
 
-    if (result.handoff) {
+    if (result.handoff || !result.replied) {
       const summary = buildHandoffSummary({
         messages: loopMessages,
         replyCount: gate.conversation.ai_reply_count ?? 0,
@@ -809,15 +824,18 @@ export async function dispatchSalesAgentNow(
         })
         .eq('id', conversationId)
       try {
-        const { actionMarkHuman } = await import('./actions/orders')
         await actionMarkHuman({
           db,
           accountId,
           conversationId,
           contactId,
-          reason: 'AI handoff',
+          reason: result.handoff
+            ? 'No suitable quick reply — Human'
+            : 'AI produced no quick reply — Human',
         })
-        log.step('handoff', 'Tagged Human + paused AI', { summary })
+        log.step('handoff', 'Tagged Human + paused AI for manual reply', {
+          summary,
+        })
       } catch {
         /* ignore */
       }

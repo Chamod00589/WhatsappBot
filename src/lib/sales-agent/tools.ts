@@ -17,7 +17,7 @@ export function buildSalesAgentTools(caps: AiConfigWithSales) {
       function: {
         name: 'send_quick_reply',
         description:
-          'Send a saved quick reply to the customer by catalog_message_id or quick_reply id. Prefer this over inventing product details.',
+          'Send a saved quick reply. For bag/product questions send each relevant product quick reply. For other questions (delivery, payment, return, etc.) send the matching custom/other quick reply. Prefer this over any free-text answer.',
         parameters: {
           type: 'object',
           properties: {
@@ -133,7 +133,7 @@ export function buildSalesAgentTools(caps: AiConfigWithSales) {
     function: {
       name: 'mark_human',
       description:
-        'Escalate to a human agent. Use for wholesale, complaints, unknown data, or when the customer asks for a person.',
+        'Tag the chat Human and pause automation so a person can reply manually. Use when no saved quick reply fits the customer question, or for wholesale/complaints/unknown requests.',
       parameters: {
         type: 'object',
         properties: {

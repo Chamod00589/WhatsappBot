@@ -12,7 +12,6 @@ import {
   actionSendTracking,
 } from './actions/orders'
 import { sendQuickReplyByCatalogId, sendLocalTextQuickReply } from './send-quick-reply'
-import { engineSendText } from '@/lib/flows/meta-send'
 import type { OrderLineItem } from '@/lib/orders/constants'
 import { languageHintForPrompt, type ReplyMode } from './language'
 import type { SalesAgentRunLogger } from './debug-log'
@@ -92,18 +91,20 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
 
   const parts = [
     'You are the Ladies Bags WhatsApp sales agent for ladiesbags.lk.',
-    'Prefer sending existing quick replies over inventing product prices or details.',
-    'When the customer asks for price / quotation (e.g. "price kohomada", "kochchara"), call send_quotation with the bags (from names or identified images) instead of inventing prices in text.',
+    'ALWAYS answer using saved quick replies via send_quick_reply (product QRs for bag questions, other/custom QRs for policies, delivery, payments, etc.).',
+    'Never invent product details, prices, or policies in free text. Do not send a plain chat reply to answer the customer.',
+    'If none of the listed quick replies are suitable for the customer question, call mark_human with a short reason so a human can reply manually.',
+    'When the customer asks for price / quotation (e.g. "price kohomada", "kochchara"), call send_quotation with the bags instead of inventing prices.',
+    'Use create_order / send_tracking / edit_order only when clearly needed from the conversation.',
     languageHintForPrompt(replyMode),
-    'Keep replies short. Do not repeat an answer the customer already received.',
-    `If you cannot help safely (wholesale, unknown policy, angry customer), call mark_human or reply with exactly ${HANDOFF_SENTINEL}.`,
-    'You may call tools to send quick replies, create orders, send quotations/tracking, edit orders, or escalate.',
+    'Keep any tool-side reasons short. Do not repeat an answer the customer already received.',
+    `If you cannot help safely (wholesale, complaints, angry customer, unknown question), call mark_human or reply with exactly ${HANDOFF_SENTINEL}.`,
     config.systemPrompt?.trim()
       ? `Business context:\n${config.systemPrompt.trim()}`
       : '',
     qrList
-      ? `Available quick replies (use send_quick_reply):\n${qrList}`
-      : '',
+      ? `Available quick replies (MUST use send_quick_reply when answering):\n${qrList}`
+      : 'No quick replies configured — call mark_human.',
   ]
   return parts.filter(Boolean).join('\n\n')
 }
@@ -252,27 +253,27 @@ async function runOpenAiToolLoop(
   const text = (msg?.content || '').trim()
   if (text.includes(HANDOFF_SENTINEL)) {
     handoff = true
-  } else if (text && !toolCalls.length) {
-    await engineSendText({
-      accountId: args.accountId,
-      userId: args.configOwnerUserId,
-      conversationId: args.conversationId,
-      contactId: args.contactId,
-      text,
-      aiGenerated: true,
-    })
-    replied = true
-  } else if (text && toolCalls.length) {
-    // Optional follow-up text after tools
-    await engineSendText({
-      accountId: args.accountId,
-      userId: args.configOwnerUserId,
-      conversationId: args.conversationId,
-      contactId: args.contactId,
-      text,
-      aiGenerated: true,
-    })
-    replied = true
+  } else if (!toolCalls.length) {
+    // QR-only policy: never send free-text answers — escalate for manual reply.
+    handoff = true
+    args.debug?.step(
+      'policy',
+      'No tool calls / free-text ignored — escalate Human (quick-reply only)',
+    )
+  } else if (text) {
+    args.debug?.step(
+      'policy',
+      'Ignored model follow-up text (tools already handled reply)',
+    )
+  }
+
+  // Tools ran but nothing useful was sent and no explicit handoff → Human
+  if (!replied && !handoff) {
+    handoff = true
+    args.debug?.step(
+      'policy',
+      'Tools produced no customer reply — escalate Human',
+    )
   }
 
   return { replied, handoff, usage, replyText: text || undefined }
@@ -286,7 +287,9 @@ async function runJsonActionLoop(
   const { generateAnthropic } = await import('@/lib/ai/providers/anthropic')
   const prompt =
     systemPrompt +
-    `\n\nRespond with ONLY JSON: {"reply":"optional customer text or empty","actions":[{"name":"tool_name","arguments":{...}}],"handoff":false}. ` +
+    `\n\nRespond with ONLY JSON: {"reply":"","actions":[{"name":"tool_name","arguments":{...}}],"handoff":false}. ` +
+    `Always prefer actions with send_quick_reply. Set handoff=true (or call mark_human) when no quick reply fits. ` +
+    `Do not put customer answers in "reply" — leave reply empty. ` +
     `Allowed action names: send_quick_reply, create_order, send_quotation, send_tracking, edit_order, mark_human.`
 
   const result = await generateAnthropic({
@@ -328,35 +331,22 @@ async function runJsonActionLoop(
     if (toolLog.length) args.debug?.set({ tools: toolLog })
     const reply = (parsed.reply || '').trim()
     replyText = reply
-    if (reply && !reply.includes(HANDOFF_SENTINEL)) {
-      await engineSendText({
-        accountId: args.accountId,
-        userId: args.configOwnerUserId,
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        text: reply,
-        aiGenerated: true,
-      })
-      replied = true
-    }
     if (reply.includes(HANDOFF_SENTINEL)) handoff = true
+    // QR-only: never send free-text "reply" to the customer
+    if (!replied && !handoff) {
+      handoff = true
+      args.debug?.step(
+        'policy',
+        'No tool reply — escalate Human (quick-reply only)',
+      )
+    }
   } catch (err) {
-    // Fallback: treat as plain text
+    // Fallback: do not send free text — escalate
     const text = result.text.replace(HANDOFF_SENTINEL, '').trim()
     replyText = text
-    if (result.text.includes(HANDOFF_SENTINEL)) handoff = true
-    else if (text) {
-      await engineSendText({
-        accountId: args.accountId,
-        userId: args.configOwnerUserId,
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        text,
-        aiGenerated: true,
-      })
-      replied = true
-    } else {
-      console.warn('[sales-agent] anthropic JSON parse failed:', err)
+    handoff = true
+    if (!result.text.includes(HANDOFF_SENTINEL)) {
+      console.warn('[sales-agent] anthropic JSON parse failed — escalate:', err)
     }
   }
 

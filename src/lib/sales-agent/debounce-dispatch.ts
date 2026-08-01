@@ -2,8 +2,9 @@ import { supabaseAdmin } from '@/lib/ai/admin-client'
 import type { SalesAgentDispatchArgs } from './types'
 import { dispatchSalesAgentNow } from './dispatch'
 
-/** Wait this long after the last inbound before analyzing the burst. */
-const DEBOUNCE_MS = 2200
+/** Quiet period after the last inbound before one Sales Agent pass.
+ *  Each new message resets this timer (wait again 10s). */
+const DEBOUNCE_MS = 10_000
 
 type BurstPart = {
   text: string
@@ -27,9 +28,10 @@ const inflight = new Set<string>()
 const pendingAfterInflight = new Map<string, ConversationBuffer>()
 
 /**
- * Coalesce rapid inbound messages for one conversation into a single
- * Sales Agent run. Webhook callers should await this so `after()` keeps
- * the isolate alive through the debounce + reply.
+ * Coalesce inbound messages for one conversation into a single Sales Agent
+ * run. After each message, wait {@link DEBOUNCE_MS}; if another message
+ * arrives, reset the wait. Only when 10s pass with no new message do we
+ * flush the full burst. Webhook callers await this so `after()` stays alive.
  */
 export async function enqueueSalesAgentDispatch(
   args: SalesAgentDispatchArgs,
@@ -115,10 +117,10 @@ async function flushConversation(key: string): Promise<void> {
         waiters: queued.waiters,
       }
       buffers.set(key, next)
-      // Short settle so a trailing msg in the same second joins this burst.
+      // Same 10s quiet window so trailing msgs join the next burst.
       next.timer = setTimeout(() => {
         void flushConversation(key)
-      }, Math.min(800, DEBOUNCE_MS))
+      }, DEBOUNCE_MS)
     }
   }
 }
