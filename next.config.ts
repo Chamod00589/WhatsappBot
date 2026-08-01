@@ -64,6 +64,8 @@ const SECURITY_HEADERS = [
 ] as const;
 
 const nextConfig: NextConfig = {
+  // Native WASM/binary package used to rasterize order/quotation cards with fonts.
+  serverExternalPackages: ["@resvg/resvg-js", "sharp"],
   /**
    * Cross-origin dev access (Next.js 16).
    *

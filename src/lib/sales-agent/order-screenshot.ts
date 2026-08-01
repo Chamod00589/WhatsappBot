@@ -169,7 +169,7 @@ export async function renderOrderCardJpeg(
 
   // Header: label + created
   parts.push(
-    `<text x="16" y="${y}" font-family="DejaVu Sans Mono, monospace" font-size="11" fill="${MUTED}">${esc(labelId)}</text>`,
+    `<text x="16" y="${y}" font-family="${FONT}" font-size="11" fill="${MUTED}">${esc(labelId)}</text>`,
   )
   y += 16
   if (created) {
@@ -313,7 +313,7 @@ export async function renderOrderCardJpeg(
     parts.push(
       `<rect x="16" y="${y - 12}" width="${tw}" height="16" rx="4" fill="#422006"/>`,
       `<text x="${16 + tw / 2}" y="${y}" text-anchor="middle" font-family="${FONT}" font-size="10" fill="#fcd34d">${esc(shipLabel)}</text>`,
-      `<text x="${16 + tw + 8}" y="${y}" font-family="DejaVu Sans Mono, monospace" font-size="12" fill="${FG}">${esc(tracking)}</text>`,
+      `<text x="${16 + tw + 8}" y="${y}" font-family="${FONT}" font-size="12" fill="${FG}">${esc(tracking)}</text>`,
     )
     y += 16
   }
