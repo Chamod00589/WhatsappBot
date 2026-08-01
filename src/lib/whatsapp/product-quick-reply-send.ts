@@ -199,7 +199,7 @@ async function deliverCatalogMessage(
   msg: CatalogQuickMessage,
   stubTitle?: string | null,
 ): Promise<ProductQuickReplySendResult> {
-  const imageUrls = msg.imageUrls
+  const imageUrls = [...(msg.imageUrls || [])]
   const captionRaw = msg.text || msg.title
   const caption = captionRaw.length > 1024 ? captionRaw.slice(0, 1024) : captionRaw
   const shortTitle =
@@ -245,6 +245,7 @@ async function deliverCatalogMessage(
     lastPersistedId = data.id as string
   }
 
+  // Send images one-by-one; never start the next until Meta ack + persist done.
   for (let i = 0; i < imageUrls.length; i++) {
     const url = imageUrls[i]
     // Full Sinhala caption goes to the customer on the first image only.
@@ -306,8 +307,9 @@ async function deliverCatalogMessage(
       })
       imagesSent += 1
 
+      // Gap between images in the same QR (and before leaving this QR).
       if (i < imageUrls.length - 1) {
-        await new Promise((r) => setTimeout(r, 300))
+        await new Promise((r) => setTimeout(r, 600))
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)

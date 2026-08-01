@@ -598,6 +598,8 @@ export async function dispatchSalesAgentNow(
         { titles: freshHits.map((h) => h.title) },
       )
       if (freshHits.length > 0) {
+        // One QR fully complete (all images) before the next — queue inside
+        // sendQuickReplyByCatalogId also serializes concurrent callers.
         for (const hit of freshHits.slice(0, 8)) {
           if (!hit.catalog_message_id) continue
           try {
