@@ -1,5 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { fetchCatalogProduct } from '@/lib/catalog/products'
+import {
+  fetchCatalogProduct,
+  fetchCatalogProducts,
+  matchCatalogProductByLooseName,
+} from '@/lib/catalog/products'
 import { catalogImageForColor } from '@/lib/orders/catalog-helpers'
 import type { OrderLineItem } from '@/lib/orders/constants'
 import { normalizeMatchText } from './normalize'
@@ -68,22 +72,60 @@ export interface BagOrderIntent {
   quickReplyId: string
 }
 
-export interface OrderPendingState {
-  type: 'awaiting_color'
-  bags: Array<{
-    productId: string | null
-    catalogMessageId: string | null
-    name: string
-    qty: number
-    quickReplyId: string
-  }>
-  addressText: string
-  askedAt: string
+export type OrderPendingBag = {
+  productId: string | null
+  catalogMessageId: string | null
+  name: string
+  qty: number
+  quickReplyId: string
 }
+
+export type OrderPendingQuotedItem = {
+  productId?: string
+  name: string
+  color: string
+  qty: number
+  price: number
+  image?: string
+}
+
+/** Saved while waiting on color, or after a quotation until address arrives. */
+export type OrderPendingState =
+  | {
+      type: 'awaiting_color'
+      bags: OrderPendingBag[]
+      addressText: string
+      askedAt: string
+    }
+  | {
+      type: 'awaiting_address'
+      items: OrderPendingQuotedItem[]
+      askedAt: string
+    }
 
 export function parseOrderPending(raw: unknown): OrderPendingState | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
+  const askedAt =
+    typeof o.askedAt === 'string' ? o.askedAt : new Date().toISOString()
+
+  if (o.type === 'awaiting_address') {
+    if (!Array.isArray(o.items) || !o.items.length) return null
+    const items = o.items
+      .filter((b): b is Record<string, unknown> => !!b && typeof b === 'object')
+      .map((b) => ({
+        productId: typeof b.productId === 'string' ? b.productId : undefined,
+        name: typeof b.name === 'string' ? b.name : 'Bag',
+        color: typeof b.color === 'string' ? b.color : '',
+        qty: Math.max(1, Number(b.qty) || 1),
+        price: Number(b.price) || 0,
+        image: typeof b.image === 'string' ? b.image : undefined,
+      }))
+      .filter((b) => b.name)
+    if (!items.length) return null
+    return { type: 'awaiting_address', items, askedAt }
+  }
+
   if (o.type !== 'awaiting_color') return null
   if (!Array.isArray(o.bags) || typeof o.addressText !== 'string') return null
   return {
@@ -99,7 +141,7 @@ export function parseOrderPending(raw: unknown): OrderPendingState | null {
         quickReplyId: typeof b.quickReplyId === 'string' ? b.quickReplyId : '',
       })),
     addressText: o.addressText,
-    askedAt: typeof o.askedAt === 'string' ? o.askedAt : new Date().toISOString(),
+    askedAt,
   }
 }
 
@@ -290,25 +332,59 @@ export function extractOrderIntents(
 export async function resolveLineItems(
   intents: BagOrderIntent[],
 ): Promise<OrderLineItem[]> {
+  let catalog: Awaited<ReturnType<typeof fetchCatalogProducts>> | null = null
+  const loadCatalog = async () => {
+    if (!catalog) {
+      try {
+        catalog = await fetchCatalogProducts()
+      } catch {
+        catalog = []
+      }
+    }
+    return catalog
+  }
+
   const items: OrderLineItem[] = []
   for (const intent of intents) {
     let price = 0
     let name = intent.name
     let image: string | undefined
-    if (intent.productId) {
+    let productId = intent.productId || undefined
+    let resolvedFromId = false
+
+    if (productId) {
       try {
-        const p = await fetchCatalogProduct(intent.productId)
+        const p = await fetchCatalogProduct(productId)
         if (p) {
+          resolvedFromId = true
           price = p.price || 0
           name = p.name || name
           image = catalogImageForColor(p, intent.color || p.colors[0] || '')
         }
       } catch {
-        /* ignore */
+        /* fall through to loose name match */
       }
     }
+
+    // Canonicalize short names like "Bloom Bag" → "Bloom Shoulder Bag"
+    if (!resolvedFromId) {
+      const all = await loadCatalog()
+      const matched = matchCatalogProductByLooseName(all, intent.name)
+      if (matched) {
+        productId = matched.id
+        name = matched.name
+        if (!price) price = matched.price || 0
+        if (!image) {
+          image = catalogImageForColor(
+            matched,
+            intent.color || matched.colors[0] || '',
+          )
+        }
+      }
+    }
+
     items.push({
-      productId: intent.productId || undefined,
+      productId,
       name,
       color: intent.color || '',
       qty: intent.qty,

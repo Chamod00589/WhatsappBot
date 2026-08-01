@@ -358,7 +358,11 @@ export async function dispatchSalesAgentNow(
 
     // 2b) Awaiting bag/color for a saved address — customer replies with details
     const orderPending = parseOrderPending(gate.conversation.sa_order_pending)
-    if (config.createOrder && orderPending && inboundText) {
+    if (
+      config.createOrder &&
+      orderPending?.type === 'awaiting_color' &&
+      inboundText
+    ) {
       const qtyFromReply = extractQty(inboundText)
 
       // Address saved earlier with no bag yet — customer now names bag (+ color)
@@ -500,6 +504,57 @@ export async function dispatchSalesAgentNow(
 
     // 2d) Address intake → create order when bag+color known; else ask via QR
     if (config.createOrder && inboundText && shouldRunOrderIntake(inboundText)) {
+      // Prefer exact line items from the last quotation (quote → address flow)
+      const quotePending = parseOrderPending(gate.conversation.sa_order_pending)
+      if (
+        quotePending?.type === 'awaiting_address' &&
+        quotePending.items.length
+      ) {
+        const quotedItems = quotePending.items.map((it) => ({
+          productId: it.productId,
+          name: it.name,
+          color: it.color || '',
+          qty: it.qty,
+          price: it.price,
+          image: it.image,
+        }))
+        const missingColor = quotedItems.filter((i) => !i.color)
+        if (missingColor.length === 0) {
+          log.step(
+            'order',
+            'Address after quotation — creating order from quoted items',
+            { items: quotedItems },
+          )
+          const r = await actionCreateOrder({
+            db,
+            accountId,
+            conversationId,
+            contactId,
+            configOwnerUserId,
+            addressText: inboundText,
+            items: quotedItems,
+            contactPhone,
+            useSinglish,
+          })
+          await clearOrderPending(db, conversationId)
+          log.step(
+            'order',
+            r.ok ? `Order created: ${r.message}` : `Create failed: ${r.message}`,
+            { items: quotedItems },
+          )
+          if (r.ok) {
+            await rememberAnsweredQuestion(db, conversationId, inboundText)
+            await claimSlot(
+              db,
+              conversationId,
+              config.autoReplyMaxPerConversation,
+            )
+            await log.complete()
+            return
+          }
+        }
+      }
+
       const offered = await loadRecentlyOfferedProducts(
         db,
         conversationId,

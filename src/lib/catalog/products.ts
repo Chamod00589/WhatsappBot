@@ -176,6 +176,51 @@ export async function fetchCatalogProduct(
   return products.find((p) => p.id === productId) ?? null
 }
 
+/**
+ * Match a loose customer / QR name (e.g. "Bloom Bag") to a catalog product
+ * ("Bloom Shoulder Bag") via exact, includes, or distinctive token overlap.
+ */
+export function matchCatalogProductByLooseName(
+  products: CatalogProduct[],
+  rawName: string,
+): CatalogProduct | null {
+  const n = String(rawName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+  if (!n) return null
+
+  const exact = products.find((p) => p.name.trim().toLowerCase() === n)
+  if (exact) return exact
+
+  const includes = products.find((p) => {
+    const pn = p.name.trim().toLowerCase()
+    return pn.includes(n) || n.includes(pn)
+  })
+  if (includes) return includes
+
+  const tokens = n
+    .split(' ')
+    .filter((t) => t.length >= 3 && t !== 'bag' && t !== 'bags')
+  if (!tokens.length) return null
+
+  const scored = products
+    .map((p) => {
+      const pn = p.name.trim().toLowerCase()
+      const hits = tokens.filter((t) => pn.includes(t)).length
+      return { p, hits }
+    })
+    .filter((x) => x.hits > 0)
+    .sort((a, b) => b.hits - a.hits || a.p.name.length - b.p.name.length)
+
+  if (!scored.length) return null
+  // Require all distinctive tokens, or a unique best hit
+  if (scored[0].hits === tokens.length) return scored[0].p
+  if (scored.length === 1) return scored[0].p
+  if (scored[0].hits > scored[1].hits) return scored[0].p
+  return null
+}
+
 function parsePriceFromQuickMessageText(text: string): number {
   const priceMatch = /බෑග් එකට\s*([\d,]+)/.exec(text || '')
   return priceMatch ? Number(priceMatch[1].replace(/,/g, '')) || 0 : 0

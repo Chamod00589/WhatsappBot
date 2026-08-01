@@ -107,13 +107,39 @@ export async function actionCreateOrder(args: {
     return { ok: false, message: 'No products selected for the order' }
   }
 
+  // Ensure catalog-canonical names (Bloom Bag → Bloom Shoulder Bag) before API create
+  let lineItems = items
+  try {
+    const { fetchCatalogProducts, matchCatalogProductByLooseName } =
+      await import('@/lib/catalog/products')
+    const catalog = await fetchCatalogProducts()
+    lineItems = items.map((it) => {
+      if (it.productId) {
+        const byId = catalog.find((p) => p.id === it.productId)
+        if (byId) {
+          return { ...it, name: byId.name, price: it.price || byId.price }
+        }
+      }
+      const matched = matchCatalogProductByLooseName(catalog, it.name)
+      if (!matched) return it
+      return {
+        ...it,
+        productId: matched.id,
+        name: matched.name,
+        price: it.price || matched.price,
+      }
+    })
+  } catch (err) {
+    console.warn('[sales-agent] canonicalize order items failed:', err)
+  }
+
   const addressBlock = await extractAddressBlock(
     db,
     accountId,
     conversationId,
     addressText,
   )
-  const orderText = buildOrderTextWithProducts(addressBlock, items)
+  const orderText = buildOrderTextWithProducts(addressBlock, lineItems)
 
   const result = (await createOrderOnLadiesbags({
     text: orderText,
@@ -148,10 +174,10 @@ export async function actionCreateOrder(args: {
   }
 
   // Merge line items we know about if API returned empty items / zero total
-  if ((!Array.isArray(order.items) || order.items.length === 0) && items.length) {
+  if ((!Array.isArray(order.items) || order.items.length === 0) && lineItems.length) {
     order = {
       ...order,
-      items: items.map((it) => ({
+      items: lineItems.map((it) => ({
         name: it.name,
         color: it.color,
         quantity: it.qty,
@@ -161,7 +187,7 @@ export async function actionCreateOrder(args: {
       })),
     }
   }
-  const itemsTotal = items.reduce((s, it) => s + it.price * it.qty, 0)
+  const itemsTotal = lineItems.reduce((s, it) => s + it.price * it.qty, 0)
   if (!numSafe(order.total_amount) && itemsTotal > 0) {
     const courier = numSafe(order.courier_charge) || 400
     order = {
@@ -322,6 +348,26 @@ export async function actionSendQuotation(args: {
       items: enriched,
       caption,
     })
+    // Remember quoted lines so a follow-up address creates the order with
+    // the same catalog names / qty / colors (avoids "Bloom Bag" mismatch).
+    await db
+      .from('conversations')
+      .update({
+        sa_order_pending: {
+          type: 'awaiting_address',
+          items: enriched.map((it) => ({
+            productId: it.productId,
+            name: it.name,
+            color: it.color || '',
+            qty: it.qty,
+            price: it.price,
+            image: it.image,
+          })),
+          askedAt: new Date().toISOString(),
+        },
+      })
+      .eq('id', conversationId)
+
     return {
       ok: true,
       message: `Quotation screenshot sent (${shot.sendMode}, ${Math.round(shot.bytes / 1024)}kb, meta=${shot.metaMediaId || 'none'}, url=${shot.publicUrl})`,
@@ -352,6 +398,23 @@ export async function actionSendQuotation(args: {
       aiGenerated: true,
     })
     await stampSummary(db, conversationId, CONTEXT_BLURBS.quotation)
+    await db
+      .from('conversations')
+      .update({
+        sa_order_pending: {
+          type: 'awaiting_address',
+          items: enriched.map((it) => ({
+            productId: it.productId,
+            name: it.name,
+            color: it.color || '',
+            qty: it.qty,
+            price: it.price,
+            image: it.image,
+          })),
+          askedAt: new Date().toISOString(),
+        },
+      })
+      .eq('id', conversationId)
     return {
       ok: true,
       message: `Quotation text sent (screenshot failed: ${errMsg})`,
