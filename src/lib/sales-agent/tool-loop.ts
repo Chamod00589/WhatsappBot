@@ -1,18 +1,26 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AiConfigWithSales } from './types'
 import type { ChatMessage, AiUsage } from '@/lib/ai/types'
-import { aiRequestTimeoutMs, HANDOFF_SENTINEL, MAX_OUTPUT_TOKENS } from '@/lib/ai/defaults'
-import { normalizeUsage, mergeConsecutive, toNetworkError, providerHttpError } from '@/lib/ai/providers/shared'
-import { buildSalesAgentTools, type ToolCallRequest } from './tools'
 import {
-  actionCreateOrder,
-  actionEditOrder,
-  actionMarkHuman,
-  actionSendQuotation,
-  actionSendTracking,
-} from './actions/orders'
-import { sendQuickReplyByCatalogId, sendLocalTextQuickReply } from './send-quick-reply'
-import type { OrderLineItem } from '@/lib/orders/constants'
+  aiRequestTimeoutMs,
+  HANDOFF_SENTINEL,
+  MAX_OUTPUT_TOKENS,
+} from '@/lib/ai/defaults'
+import {
+  normalizeUsage,
+  mergeConsecutive,
+  toNetworkError,
+  providerHttpError,
+} from '@/lib/ai/providers/shared'
+import {
+  buildSalesAgentTools,
+  AGENT_TOOL_NAMES,
+  type ToolCallRequest,
+} from './tools'
+import {
+  executeAgentTool,
+  type ToolExecContext,
+} from './tool-executors'
 import { languageHintForPrompt, type ReplyMode } from './language'
 import type { SalesAgentRunLogger } from './debug-log'
 import {
@@ -22,9 +30,14 @@ import {
   shouldSuggestOpenRouterZdrFallback,
 } from '@/lib/ai/providers/openrouter-routing'
 import { AiError } from '@/lib/ai/types'
+import type { MatchableQuickReply } from './match-products'
+import type { CustomQuickReply } from './match-custom-qr'
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
+
+/** Max model↔tool rounds so identify → quote can complete in one dispatch. */
+const MAX_TOOL_ROUNDS = 4
 
 export interface ToolLoopArgs {
   db: SupabaseClient
@@ -35,17 +48,18 @@ export interface ToolLoopArgs {
   configOwnerUserId: string
   contactPhone: string | null
   messages: ChatMessage[]
+  /** Extra facts for the system prompt (pending order, images, etc.). */
   systemExtra: string
   useSinglish: boolean
-  /** Preferred reply language; defaults from useSinglish when omitted. */
   replyMode?: ReplyMode
-  availableQuickReplies: Array<{
-    id: string
-    title: string
-    description: string | null
-    catalog_message_id: string | null
+  productCatalog: MatchableQuickReply[]
+  customCatalog: CustomQuickReply[]
+  inboundImages: Array<{
+    mediaUrl?: string | null
+    metaMediaId?: string | null
+    caption?: string | null
   }>
-  /** Optional troubleshoot logger from dispatch. */
+  burstText: string
   debug?: SalesAgentRunLogger
 }
 
@@ -57,15 +71,15 @@ export interface ToolLoopResult {
 }
 
 /**
- * One-shot tool-calling round (OpenAI-compatible). Anthropic falls back
- * to JSON action instructions in the system prompt.
+ * LLM-first Sales Agent loop: model decides tools; executors perform side effects.
+ * Supports multiple tool rounds so identify → find/quote/order can chain.
  */
 export async function runSalesAgentToolLoop(
   args: ToolLoopArgs,
 ): Promise<ToolLoopResult> {
   const { config } = args
   if (!config.aiText) {
-    return { replied: false, handoff: false, usage: null, replyText: undefined }
+    return { replied: false, handoff: false, usage: null }
   }
 
   const systemPrompt = buildAgentSystemPrompt(args)
@@ -76,39 +90,85 @@ export async function runSalesAgentToolLoop(
 }
 
 function buildAgentSystemPrompt(args: ToolLoopArgs): string {
-  const { config, availableQuickReplies, useSinglish } = args
+  const { config, productCatalog, customCatalog, useSinglish } = args
   const replyMode: ReplyMode =
     args.replyMode ?? (useSinglish ? 'singlish' : 'tanglish')
-  const qrList = availableQuickReplies
-    .slice(0, 80)
+
+  const productList = productCatalog
+    .slice(0, 60)
+    .map(
+      (q) =>
+        `- ${q.title} | id=${q.id}` +
+        (q.product_id ? ` | product=${q.product_id}` : '') +
+        (q.catalog_message_id ? ` | catalog=${q.catalog_message_id}` : ''),
+    )
+    .join('\n')
+
+  const faqList = customCatalog
+    .slice(0, 40)
     .map(
       (q) =>
         `- ${q.title} | id=${q.id}` +
         (q.catalog_message_id ? ` | catalog=${q.catalog_message_id}` : '') +
-        (q.description ? ` | ${q.description.slice(0, 120)}` : ''),
+        (q.description ? ` | ${q.description.slice(0, 140)}` : ''),
     )
     .join('\n')
 
+  const imageNote = args.inboundImages.length
+    ? `Customer attached ${args.inboundImages.length} image(s) this turn — call identify_product when they look like bag photos.`
+    : 'No new images this turn.'
+
   const parts = [
     'You are the Ladies Bags WhatsApp sales agent for ladiesbags.lk.',
-    'ALWAYS answer using saved quick replies via send_quick_reply when the customer asks a FAQ/policy question. Match against each quick reply DESCRIPTION (what the reply covers), not just the title.',
-    'Never invent product details, prices, or policies in free text. Do not send a plain chat reply to answer the customer.',
-    'If none of the listed quick replies are suitable for the customer question, call mark_human with a short reason so a human can reply manually.',
-    'When the customer asks for price / quotation (e.g. "price kohomada", bag "kochchara"), call send_quotation with the bags instead of inventing prices.',
-    'When the customer asks about delivery time / how many days (e.g. "Deliver karanna kocchara dawasak yanwada"), call send_quick_reply for the delivery Quick Reply — do NOT call send_quotation again.',
-    'After an order was created, if the customer asks to change bag color / qty / address, call edit_order (do NOT send a product or "White bags" style quick reply).',
-    'Use create_order / send_tracking / edit_order only when clearly needed from the conversation.',
+    'You are the single decision-maker for this conversation. Read the full recent chat, then call one or more tools to help.',
+    'You MAY call multiple tools in the same turn for mixed intents (e.g. find_product + generate_quote + answer_delivery).',
+    'Prefer tools over guessing. Never invent catalog prices, delivery times, or return policies — use generate_quote / answer_delivery / answer_policy.',
+    'Flow tips:',
+    '- Bag photo → identify_product (send_product_card true unless you need facts only).',
+    '- Customer names a bag → find_product.',
+    '- Asks price / how much / kochchara → generate_quote (after bags are known).',
+    '- Sends name+address+phone with bag+color → create_order.',
+    '- Missing color/qty/address → ask_missing_information (short Singlish/Tanglish).',
+    '- Delivery days/shipping FAQ → answer_delivery (not generate_quote).',
+    '- Other FAQ → answer_policy.',
+    '- Confirms pending order (ok/hari/yes) → confirm_order.',
+    '- Changes color/qty on an existing order → update_order.',
+    '- Wholesale, complaints, angry, or unsafe → handover_to_human.',
     languageHintForPrompt(replyMode),
-    'Keep any tool-side reasons short. Do not repeat an answer the customer already received.',
-    `If you cannot help safely (wholesale, complaints, angry customer, unknown question), call mark_human or reply with exactly ${HANDOFF_SENTINEL}.`,
+    'Keep ask_missing_information messages short (1–2 sentences). Do not dump long policy text as free messages.',
+    `If you cannot help safely, call handover_to_human or reply with exactly ${HANDOFF_SENTINEL}.`,
+    imageNote,
     config.systemPrompt?.trim()
       ? `Business context:\n${config.systemPrompt.trim()}`
       : '',
-    qrList
-      ? `Available quick replies (match DESCRIPTION to the customer question, then send_quick_reply):\n${qrList}`
-      : 'No quick replies configured — call mark_human.',
+    args.systemExtra?.trim() ? `Session state:\n${args.systemExtra.trim()}` : '',
+    productList
+      ? `Catalog product cards (use find_product / generate_quote):\n${productList}`
+      : 'No product cards configured.',
+    faqList
+      ? `FAQ / policy / delivery quick replies (use answer_delivery or answer_policy):\n${faqList}`
+      : 'No FAQ quick replies configured.',
   ]
   return parts.filter(Boolean).join('\n\n')
+}
+
+function buildExecContext(args: ToolLoopArgs): ToolExecContext {
+  const replyMode: ReplyMode =
+    args.replyMode ?? (args.useSinglish ? 'singlish' : 'tanglish')
+  return {
+    db: args.db,
+    accountId: args.accountId,
+    conversationId: args.conversationId,
+    contactId: args.contactId,
+    configOwnerUserId: args.configOwnerUserId,
+    contactPhone: args.contactPhone,
+    useSinglish: args.useSinglish,
+    replyMode,
+    inboundImages: args.inboundImages,
+    burstText: args.burstText,
+    productCatalog: args.productCatalog,
+    customCatalog: args.customCatalog,
+  }
 }
 
 async function runOpenAiToolLoop(
@@ -120,14 +180,41 @@ async function runOpenAiToolLoop(
     config.provider === 'openrouter' ? OPENROUTER_URL : OPENAI_URL
   const tools = buildSalesAgentTools(config)
   const timeoutMs = aiRequestTimeoutMs()
+  const execCtx = buildExecContext(args)
+
+  type ApiMessage =
+    | { role: 'system'; content: string }
+    | { role: 'user' | 'assistant'; content: string }
+    | {
+        role: 'assistant'
+        content: string | null
+        tool_calls: Array<{
+          id: string
+          type: 'function'
+          function: { name: string; arguments: string }
+        }>
+      }
+    | { role: 'tool'; tool_call_id: string; content: string }
+
+  const apiMessages: ApiMessage[] = [
+    { role: 'system', content: systemPrompt },
+    ...mergeConsecutive(args.messages).map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    })),
+  ]
+
+  let replied = false
+  let handoff = false
+  let lastText = ''
+  let usageAcc: AiUsage | null = null
+  const toolLog: Array<{ name: string; arguments: unknown; result?: string }> =
+    []
 
   const callModel = async (model: string): Promise<Response> => {
     const body: Record<string, unknown> = {
       model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...mergeConsecutive(args.messages),
-      ],
+      messages: apiMessages,
       tools,
       tool_choice: 'auto',
     }
@@ -155,121 +242,157 @@ async function runOpenAiToolLoop(
     })
   }
 
-  let res: Response
-  let usedModel = config.model
-  try {
-    res = await callModel(config.model)
-    if (
-      !res.ok &&
-      config.provider === 'openrouter' &&
-      shouldSuggestOpenRouterZdrFallback(config.model)
-    ) {
-      // Peek at body for privacy/ZDR 404, then retry with a ZDR-capable model.
-      const cloned = res.clone()
-      const err = await providerHttpError(config.provider, cloned)
-      if (isOpenRouterPrivacyError(err)) {
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    args.debug?.step('ai_tools', `Model round ${round + 1}/${MAX_TOOL_ROUNDS}`)
+
+    let res: Response
+    let usedModel = config.model
+    try {
+      res = await callModel(config.model)
+      if (
+        !res.ok &&
+        config.provider === 'openrouter' &&
+        shouldSuggestOpenRouterZdrFallback(config.model)
+      ) {
+        const cloned = res.clone()
+        const err = await providerHttpError(config.provider, cloned)
+        if (isOpenRouterPrivacyError(err)) {
+          args.debug?.step(
+            'ai_tools',
+            `OpenRouter privacy blocked ${config.model} — retrying ${OPENROUTER_ZDR_FALLBACK_MODEL}`,
+          )
+          usedModel = OPENROUTER_ZDR_FALLBACK_MODEL
+          res = await callModel(OPENROUTER_ZDR_FALLBACK_MODEL)
+        } else {
+          throw err
+        }
+      }
+    } catch (err) {
+      if (err instanceof AiError) throw err
+      throw toNetworkError(err)
+    }
+    if (!res.ok) throw await providerHttpError(config.provider, res)
+    if (usedModel !== config.model) {
+      args.debug?.step('ai_tools', `Using fallback model ${usedModel}`)
+    }
+
+    const data = (await res.json()) as {
+      choices?: {
+        message?: {
+          content?: string | null
+          tool_calls?: Array<{
+            id: string
+            function?: { name?: string; arguments?: string }
+          }>
+        }
+        finish_reason?: string
+      }[]
+      usage?: {
+        prompt_tokens?: number
+        completion_tokens?: number
+        total_tokens?: number
+      }
+    }
+
+    const roundUsage = normalizeUsage({
+      prompt: data.usage?.prompt_tokens,
+      completion: data.usage?.completion_tokens,
+      total: data.usage?.total_tokens,
+    })
+    usageAcc = mergeUsage(usageAcc, roundUsage)
+
+    const msg = data.choices?.[0]?.message
+    const toolCalls: ToolCallRequest[] = (msg?.tool_calls ?? [])
+      .map((tc) => {
+        let parsed: Record<string, unknown> = {}
+        try {
+          parsed = JSON.parse(tc.function?.arguments || '{}') as Record<
+            string,
+            unknown
+          >
+        } catch {
+          parsed = {}
+        }
+        return {
+          id: tc.id,
+          name: tc.function?.name || '',
+          arguments: parsed,
+        }
+      })
+      .filter((t) => t.name)
+
+    const text = (msg?.content || '').trim()
+    if (text) lastText = text
+
+    if (text.includes(HANDOFF_SENTINEL)) {
+      handoff = true
+      break
+    }
+
+    if (!toolCalls.length) {
+      // No tools: only escalate if we also didn't already help this turn
+      if (!replied) {
+        handoff = true
         args.debug?.step(
-          'ai_tools',
-          `OpenRouter privacy blocked ${config.model} — retrying ${OPENROUTER_ZDR_FALLBACK_MODEL}`,
+          'policy',
+          'No tool calls and nothing sent — escalate Human',
         )
-        usedModel = OPENROUTER_ZDR_FALLBACK_MODEL
-        res = await callModel(OPENROUTER_ZDR_FALLBACK_MODEL)
       } else {
-        throw err
+        args.debug?.step(
+          'policy',
+          'Model finished with follow-up text after tools — ignored',
+        )
       }
+      break
     }
-  } catch (err) {
-    if (err instanceof AiError) throw err
-    throw toNetworkError(err)
-  }
-  if (!res.ok) throw await providerHttpError(config.provider, res)
-  if (usedModel !== config.model) {
-    args.debug?.step('ai_tools', `Using fallback model ${usedModel}`)
-  }
 
-  const data = (await res.json()) as {
-    choices?: {
-      message?: {
-        content?: string | null
-        tool_calls?: Array<{
-          id: string
-          function?: { name?: string; arguments?: string }
-        }>
-      }
-    }[]
-    usage?: {
-      prompt_tokens?: number
-      completion_tokens?: number
-      total_tokens?: number
-    }
-  }
-
-  const usage = normalizeUsage({
-    prompt: data.usage?.prompt_tokens,
-    completion: data.usage?.completion_tokens,
-    total: data.usage?.total_tokens,
-  })
-
-  const msg = data.choices?.[0]?.message
-  const toolCalls: ToolCallRequest[] = (msg?.tool_calls ?? [])
-    .map((tc) => {
-      let parsed: Record<string, unknown> = {}
-      try {
-        parsed = JSON.parse(tc.function?.arguments || '{}') as Record<
-          string,
-          unknown
-        >
-      } catch {
-        parsed = {}
-      }
-      return {
+    apiMessages.push({
+      role: 'assistant',
+      content: text || null,
+      tool_calls: toolCalls.map((tc) => ({
         id: tc.id,
-        name: tc.function?.name || '',
-        arguments: parsed,
-      }
+        type: 'function' as const,
+        function: {
+          name: tc.name,
+          arguments: JSON.stringify(tc.arguments ?? {}),
+        },
+      })),
     })
-    .filter((t) => t.name)
 
-  let replied = false
-  let handoff = false
-  const toolLog: Array<{ name: string; arguments: unknown; result?: string }> =
-    []
+    for (const call of toolCalls) {
+      args.debug?.step('tool', `Calling ${call.name}`, call.arguments)
+      const result = await executeAgentTool(execCtx, call)
+      toolLog.push({
+        name: call.name,
+        arguments: call.arguments,
+        result: result.note,
+      })
+      args.debug?.step(
+        'tool',
+        `${call.name} → ${result.note || (result.replied ? 'ok' : 'no-op')}`,
+      )
+      if (result.replied) replied = true
+      if (result.handoff) handoff = true
 
-  for (const call of toolCalls) {
-    args.debug?.step('tool', `Calling ${call.name}`, call.arguments)
-    const result = await executeToolCall(args, call)
-    toolLog.push({
-      name: call.name,
-      arguments: call.arguments,
-      result: result.note,
-    })
-    args.debug?.step(
-      'tool',
-      `${call.name} → ${result.note || (result.replied ? 'ok' : 'no-op')}`,
-    )
-    if (result.replied) replied = true
-    if (result.handoff) handoff = true
+      apiMessages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        content: JSON.stringify({
+          ok: result.replied || !result.handoff,
+          note: result.note,
+          ...(result.resultPayload && typeof result.resultPayload === 'object'
+            ? (result.resultPayload as object)
+            : { data: result.resultPayload }),
+        }),
+      })
+    }
+
+    if (handoff) break
+    // Continue another round so the model can act on tool results
   }
+
   if (toolLog.length) args.debug?.set({ tools: toolLog })
 
-  const text = (msg?.content || '').trim()
-  if (text.includes(HANDOFF_SENTINEL)) {
-    handoff = true
-  } else if (!toolCalls.length) {
-    // QR-only policy: never send free-text answers — escalate for manual reply.
-    handoff = true
-    args.debug?.step(
-      'policy',
-      'No tool calls / free-text ignored — escalate Human (quick-reply only)',
-    )
-  } else if (text) {
-    args.debug?.step(
-      'policy',
-      'Ignored model follow-up text (tools already handled reply)',
-    )
-  }
-
-  // Tools ran but nothing useful was sent and no explicit handoff → Human
   if (!replied && !handoff) {
     handoff = true
     args.debug?.step(
@@ -278,21 +401,26 @@ async function runOpenAiToolLoop(
     )
   }
 
-  return { replied, handoff, usage, replyText: text || undefined }
+  return {
+    replied,
+    handoff,
+    usage: usageAcc,
+    replyText: lastText || undefined,
+  }
 }
 
 async function runJsonActionLoop(
   args: ToolLoopArgs,
   systemPrompt: string,
 ): Promise<ToolLoopResult> {
-  // Anthropic: ask for a single JSON object, no native tools required.
   const { generateAnthropic } = await import('@/lib/ai/providers/anthropic')
+  const execCtx = buildExecContext(args)
   const prompt =
     systemPrompt +
-    `\n\nRespond with ONLY JSON: {"reply":"","actions":[{"name":"tool_name","arguments":{...}}],"handoff":false}. ` +
-    `Always prefer actions with send_quick_reply. Set handoff=true (or call mark_human) when no quick reply fits. ` +
-    `Do not put customer answers in "reply" — leave reply empty. ` +
-    `Allowed action names: send_quick_reply, create_order, send_quotation, send_tracking, edit_order, mark_human.`
+    `\n\nRespond with ONLY JSON: {"actions":[{"name":"tool_name","arguments":{...}}],"handoff":false}. ` +
+    `Call every tool needed for this customer message (multiple actions allowed). ` +
+    `Do not put customer answers in free text — use ask_missing_information for clarifying questions. ` +
+    `Allowed action names: ${AGENT_TOOL_NAMES.join(', ')}.`
 
   const result = await generateAnthropic({
     apiKey: args.config.apiKey,
@@ -307,6 +435,7 @@ async function runJsonActionLoop(
   let replyText: string | undefined
   const toolLog: Array<{ name: string; arguments: unknown; result?: string }> =
     []
+
   try {
     const jsonText = extractJson(result.text)
     const parsed = JSON.parse(jsonText) as {
@@ -317,7 +446,7 @@ async function runJsonActionLoop(
     if (parsed.handoff) handoff = true
     for (const a of parsed.actions ?? []) {
       args.debug?.step('tool', `Calling ${a.name}`, a.arguments)
-      const r = await executeToolCall(args, {
+      const r = await executeAgentTool(execCtx, {
         id: a.name,
         name: a.name,
         arguments: a.arguments ?? {},
@@ -334,16 +463,14 @@ async function runJsonActionLoop(
     const reply = (parsed.reply || '').trim()
     replyText = reply
     if (reply.includes(HANDOFF_SENTINEL)) handoff = true
-    // QR-only: never send free-text "reply" to the customer
     if (!replied && !handoff) {
       handoff = true
       args.debug?.step(
         'policy',
-        'No tool reply — escalate Human (quick-reply only)',
+        'No tool reply — escalate Human',
       )
     }
   } catch (err) {
-    // Fallback: do not send free text — escalate
     const text = result.text.replace(HANDOFF_SENTINEL, '').trim()
     replyText = text
     handoff = true
@@ -364,202 +491,12 @@ function extractJson(raw: string): string {
   return raw.trim()
 }
 
-async function executeToolCall(
-  args: ToolLoopArgs,
-  call: ToolCallRequest,
-): Promise<{ replied: boolean; handoff: boolean; note: string }> {
-  const { db, accountId, conversationId, contactId, configOwnerUserId } = args
-  const a = call.arguments
-
-  switch (call.name) {
-    case 'send_quick_reply': {
-      const catalogId =
-        typeof a.catalog_message_id === 'string' ? a.catalog_message_id : ''
-      const qrId = typeof a.quick_reply_id === 'string' ? a.quick_reply_id : ''
-      if (catalogId) {
-        await sendQuickReplyByCatalogId({
-          db,
-          accountId,
-          conversationId,
-          catalogMessageId: catalogId,
-          contextSummary:
-            typeof a.reason === 'string'
-              ? `Sent quick reply: ${a.reason}`
-              : `Sent catalog quick reply ${catalogId}`,
-        })
-        return { replied: true, handoff: false, note: `sent catalog ${catalogId}` }
-      }
-      if (qrId) {
-        const { data: qr } = await db
-          .from('quick_replies')
-          .select('*')
-          .eq('id', qrId)
-          .eq('account_id', accountId)
-          .maybeSingle()
-        if (qr?.catalog_message_id) {
-          await sendQuickReplyByCatalogId({
-            db,
-            accountId,
-            conversationId,
-            catalogMessageId: qr.catalog_message_id,
-            contextSummary: qr.description || qr.title,
-          })
-          return {
-            replied: true,
-            handoff: false,
-            note: `sent QR ${qr.title}`,
-          }
-        }
-        if (qr?.kind === 'text' && qr.content_text) {
-          await sendLocalTextQuickReply({
-            db,
-            accountId,
-            userId: configOwnerUserId,
-            conversationId,
-            contactId,
-            text: qr.content_text,
-            contextSummary: qr.description || qr.title,
-          })
-          return {
-            replied: true,
-            handoff: false,
-            note: `sent text QR ${qr.title}`,
-          }
-        }
-      }
-      return { replied: false, handoff: false, note: 'quick reply not found' }
-    }
-    case 'create_order': {
-      const addressText =
-        typeof a.address_text === 'string' ? a.address_text : ''
-      const items = normalizeItems(a.items)
-      const r = await actionCreateOrder({
-        db,
-        accountId,
-        conversationId,
-        contactId,
-        configOwnerUserId,
-        addressText,
-        items,
-        contactPhone: args.contactPhone,
-        useSinglish: args.useSinglish,
-      })
-      return { replied: r.ok, handoff: false, note: r.message }
-    }
-    case 'send_quotation': {
-      const items = normalizeItems(a.items)
-      const r = await actionSendQuotation({
-        db,
-        accountId,
-        conversationId,
-        contactId,
-        configOwnerUserId,
-        items,
-        useSinglish: args.useSinglish,
-      })
-      return { replied: r.ok, handoff: false, note: r.message }
-    }
-    case 'send_tracking': {
-      if (!args.contactPhone) {
-        return { replied: false, handoff: false, note: 'no contact phone' }
-      }
-      const r = await actionSendTracking({
-        db,
-        accountId,
-        conversationId,
-        contactId,
-        configOwnerUserId,
-        contactPhone: args.contactPhone,
-      })
-      return { replied: r.ok, handoff: false, note: r.message }
-    }
-    case 'edit_order': {
-      let orderId = typeof a.order_id === 'string' ? a.order_id : ''
-      const patch =
-        a.patch && typeof a.patch === 'object'
-          ? (a.patch as Record<string, unknown>)
-          : {}
-
-      // Resolve latest order for this chat when model omits order_id
-      if (!orderId && args.contactPhone) {
-        try {
-          const { fetchOrderByPhone } = await import(
-            '@/lib/orders/ladiesbags-orders'
-          )
-          const fresh = (await fetchOrderByPhone({
-            phone: args.contactPhone,
-            days: 7,
-            whatsappOnly: false,
-          })) as { order?: { id?: string } }
-          if (fresh?.order?.id) orderId = String(fresh.order.id)
-        } catch {
-          /* ignore */
-        }
-      }
-
-      // Color-only patch convenience
-      const colorHint =
-        typeof patch.color === 'string'
-          ? patch.color
-          : typeof (patch as { new_color?: string }).new_color === 'string'
-            ? (patch as { new_color: string }).new_color
-            : null
-      if (colorHint && args.contactPhone && !patch.items) {
-        const { actionEditOrderColor } = await import('./order-edit-intent')
-        const r = await actionEditOrderColor({
-          db,
-          accountId,
-          conversationId,
-          contactId,
-          configOwnerUserId,
-          contactPhone: args.contactPhone,
-          newColor: colorHint,
-          useSinglish: args.useSinglish,
-        })
-        return { replied: r.ok, handoff: false, note: r.message }
-      }
-
-      if (!orderId) {
-        return { replied: false, handoff: false, note: 'missing order_id' }
-      }
-      const r = await actionEditOrder({ orderId, patch })
-      return { replied: r.ok, handoff: false, note: r.message }
-    }
-    case 'mark_human': {
-      await actionMarkHuman({
-        db,
-        accountId,
-        conversationId,
-        contactId,
-        reason: typeof a.reason === 'string' ? a.reason : undefined,
-      })
-      return { replied: false, handoff: true, note: 'marked Human' }
-    }
-    default:
-      console.warn('[sales-agent] unknown tool', call.name)
-      return { replied: false, handoff: false, note: `unknown tool ${call.name}` }
+function mergeUsage(a: AiUsage | null, b: AiUsage | null): AiUsage | null {
+  if (!a) return b
+  if (!b) return a
+  return {
+    promptTokens: (a.promptTokens || 0) + (b.promptTokens || 0),
+    completionTokens: (a.completionTokens || 0) + (b.completionTokens || 0),
+    totalTokens: (a.totalTokens || 0) + (b.totalTokens || 0),
   }
-}
-
-function normalizeItems(raw: unknown): OrderLineItem[] {
-  if (!Array.isArray(raw)) return []
-  const out: OrderLineItem[] = []
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue
-    const o = item as Record<string, unknown>
-    const name = typeof o.name === 'string' ? o.name : ''
-    if (!name) continue
-    const qty = Math.max(
-      1,
-      Number(o.qty ?? o.quantity) || 1,
-    )
-    out.push({
-      productId: typeof o.productId === 'string' ? o.productId : undefined,
-      name,
-      color: typeof o.color === 'string' ? o.color : '',
-      qty,
-      price: Number(o.price) || 0,
-    })
-  }
-  return out
 }
