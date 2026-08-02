@@ -37,7 +37,7 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'identify_product',
         description:
-          'Identify bag(s) in the customer inbound image(s) via vision matching. Call when the customer sent a photo of a bag. Returns matches (product, color, confidence). Set send_product_card=true to also send the matching product quick-reply card when confidence is high.',
+          'Identify bag(s) in the customer inbound image(s) via vision matching. Call when the customer sent a photo of a bag. Returns matches (product, color, confidence). Set send_product_card=true to also send the matching product quick-reply card when confidence is high. When cards are sent successfully, the server also auto-sends a price quotation for those bags (quotation_sent=true) — do not call generate_quote again in that case.',
         parameters: {
           type: 'object',
           properties: {
@@ -89,7 +89,7 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'generate_quote',
         description:
-          'Send a price quotation (screenshot/card) for the selected bags. Use when the customer asks price / how much / kochchara / quotation. Prefer items from the conversation; if items omitted, uses bags already saved in this chat.',
+          'Send a price quotation (screenshot/card) for the selected bags. Use when the customer asks price / how much / kochchara / quotation, or after find_product when they want a total. Prefer items from the conversation; if items omitted, uses bags already saved in this chat. Skip if identify_product already returned quotation_sent=true this turn.',
         parameters: {
           type: 'object',
           properties: {

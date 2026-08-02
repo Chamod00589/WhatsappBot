@@ -25,6 +25,7 @@ import {
   applyReplyReferenceToPending,
   resolveReplyReference,
 } from './reply-reference'
+import { markAgentUnableToReply, removeNamedTag } from './tags'
 
 /**
  * Sales Agent entry — LLM-first architecture.
@@ -215,9 +216,16 @@ export async function dispatchSalesAgentNow(
           contactId,
           reason: 'Sales Agent AI decision layer off (sa_ai_text)',
         })
+        await markAgentUnableToReply({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          ownerUserId: configOwnerUserId,
+        })
         log.step(
           'handoff',
-          'AI decision layer off — tagged Human for manual reply',
+          'AI decision layer off — tagged Human + Unread for manual reply',
         )
       } else {
         log.step('ai_tools', 'AI decision layer off — stop')
@@ -405,9 +413,18 @@ export async function dispatchSalesAgentNow(
             ? 'Agent handoff — Human'
             : 'Agent produced no reply — Human',
         })
-        log.step('handoff', 'Tagged Human + paused AI for manual reply', {
-          summary,
+        await markAgentUnableToReply({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          ownerUserId: configOwnerUserId,
         })
+        log.step(
+          'handoff',
+          'Tagged Human + Unread + paused AI for manual reply',
+          { summary },
+        )
       } catch {
         /* ignore */
       }
@@ -420,10 +437,37 @@ export async function dispatchSalesAgentNow(
         await rememberAnsweredQuestion(db, conversationId, inboundText)
       }
       await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
+      try {
+        await removeNamedTag(db, accountId, contactId, 'Unread')
+      } catch {
+        /* ignore */
+      }
     }
     await log.complete()
   } catch (err) {
     console.error('[sales-agent] dispatch failed:', err)
+    try {
+      await markAgentUnableToReply({
+        db,
+        accountId,
+        conversationId,
+        contactId,
+        ownerUserId: configOwnerUserId,
+      })
+      await actionMarkHuman({
+        db,
+        accountId,
+        conversationId,
+        contactId,
+        reason: `Agent error — ${err instanceof Error ? err.message : String(err)}`.slice(
+          0,
+          200,
+        ),
+      })
+      log.step('handoff', 'Dispatch error — tagged Human + Unread')
+    } catch {
+      /* ignore secondary failures */
+    }
     await log.fail(err)
   }
 }

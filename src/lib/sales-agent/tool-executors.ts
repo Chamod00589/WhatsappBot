@@ -32,6 +32,7 @@ import {
   parseOrderPending,
   productDisplayName,
   resolveLineItems,
+  toOrderLineItems,
   toPendingQuotedItems,
   upsertAwaitingAddressItems,
   type BagOrderIntent,
@@ -58,6 +59,13 @@ export type ToolExecContext = {
   contactPhone: string | null
   useSinglish: boolean
   replyMode: ReplyMode
+  /** When true, identify auto-sends a quotation after product cards. */
+  quotationEnabled: boolean
+  /**
+   * Set when a quotation was already sent this tool-loop turn
+   * (avoids duplicate generate_quote after identify auto-quote).
+   */
+  quoteSentThisTurn: boolean
   inboundImages: Array<{
     mediaUrl?: string | null
     metaMediaId?: string | null
@@ -169,11 +177,23 @@ async function execIdentifyProduct(
       useSinglish: ctx.useSinglish,
     })
     if (r.handled) {
+      const afterConfirm = await loadPendingItems(ctx)
+      const quote = await maybeAutoQuoteAfterIdentify(ctx, afterConfirm)
       return {
         replied: true,
         handoff: false,
-        note: 'resolved identify confirmation',
-        resultPayload: { confirmed: true, product: pending.product },
+        note: quote?.ok
+          ? `resolved identify confirmation + sent quotation (${afterConfirm.length} line(s))`
+          : 'resolved identify confirmation',
+        resultPayload: {
+          confirmed: true,
+          product: pending.product,
+          saved_items: afterConfirm,
+          quotation_sent: Boolean(quote?.ok),
+          next: quote?.ok
+            ? 'Quotation already sent after product cards — do NOT call generate_quote again this turn.'
+            : 'Call generate_quote with saved items if quotation is enabled.',
+        },
       }
     }
   }
@@ -189,18 +209,26 @@ async function execIdentifyProduct(
       burstText: ctx.burstText,
       useSinglish: ctx.useSinglish,
     })
-    const saved = (r.savedItems || []).map((it) => ({
+    const savedRaw = r.savedItems || []
+    const saved = savedRaw.map((it) => ({
       name: it.name,
       color: it.color || '',
       qty: it.qty,
       productId: it.productId,
       price: it.price,
     }))
+    const quote =
+      r.sentQr && savedRaw.length
+        ? await maybeAutoQuoteAfterIdentify(ctx, toOrderLineItems(savedRaw))
+        : null
+    const quoteNote = quote?.ok
+      ? `; sent quotation for ${saved.length} line(s)`
+      : ''
     return {
-      replied: r.handled,
+      replied: r.handled || Boolean(quote?.ok),
       handoff: false,
       note: r.sentQr
-        ? `identified + sent ${r.qrCount} product card(s); saved ${saved.length} line(s) in memory`
+        ? `identified + sent ${r.qrCount} product card(s); saved ${saved.length} line(s) in memory${quoteNote}`
         : r.handled
           ? 'identified — asked customer to confirm'
           : 'identify produced no match',
@@ -209,8 +237,10 @@ async function execIdentifyProduct(
         sentQr: r.sentQr,
         qrCount: r.qrCount,
         saved_items: saved,
-        next:
-          'Use saved_items colors/qty for generate_quote / create_order. Call find_product only for bags not already in saved_items.',
+        quotation_sent: Boolean(quote?.ok),
+        next: quote?.ok
+          ? 'Quotation already sent after product cards — do NOT call generate_quote again this turn. Use saved_items for create_order later.'
+          : 'Use saved_items colors/qty for generate_quote / create_order. Call find_product only for bags not already in saved_items.',
       },
     }
   }
@@ -357,6 +387,15 @@ async function execGenerateQuote(
   ctx: ToolExecContext,
   a: Record<string, unknown>,
 ): Promise<ToolExecResult> {
+  if (ctx.quoteSentThisTurn) {
+    return {
+      replied: true,
+      handoff: false,
+      note: 'quotation already sent this turn (after identify)',
+      resultPayload: { ok: true, already_sent: true },
+    }
+  }
+
   let items = await resolveItemsArg(ctx, a.items)
   if (!items.length) {
     items = await loadPendingItems(ctx)
@@ -393,12 +432,34 @@ async function execGenerateQuote(
     items,
     useSinglish: ctx.useSinglish,
   })
+  if (r.ok) ctx.quoteSentThisTurn = true
   return {
     replied: r.ok,
     handoff: false,
     note: r.message,
     resultPayload: { ok: r.ok, items },
   }
+}
+
+/** After product cards from identify, send price quotation for saved lines. */
+async function maybeAutoQuoteAfterIdentify(
+  ctx: ToolExecContext,
+  items: OrderLineItem[],
+): Promise<{ ok: boolean; message: string } | null> {
+  if (!ctx.quotationEnabled || ctx.quoteSentThisTurn || !items.length) {
+    return null
+  }
+  const r = await actionSendQuotation({
+    db: ctx.db,
+    accountId: ctx.accountId,
+    conversationId: ctx.conversationId,
+    contactId: ctx.contactId,
+    configOwnerUserId: ctx.configOwnerUserId,
+    items,
+    useSinglish: ctx.useSinglish,
+  })
+  if (r.ok) ctx.quoteSentThisTurn = true
+  return r
 }
 
 async function execCreateOrder(
