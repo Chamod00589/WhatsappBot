@@ -130,13 +130,19 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'update_order',
         description:
-          'Update an existing order (color, qty, address, notes) after it was created. Use for "color eka white karanna", change qty, etc. Do not send a product FAQ card for that.',
+          'Update bag/color/qty for this chat. If an order already exists: merge/replace items (mode=add|replace) or change color, then re-send the order confirm screenshot. If NO order yet: update the last quotation memory the same way and re-send the quotation screenshot; if no quotation exists yet, send a new quotation with the requested bags/colors. For ADD ("ekakuth add"), pass only the NEW bag(s) with mode=add.',
         parameters: {
           type: 'object',
           properties: {
             order_id: {
               type: 'string',
               description: 'Order UUID if known; otherwise latest order for this phone is used',
+            },
+            mode: {
+              type: 'string',
+              enum: ['add', 'replace'],
+              description:
+                'add = append/merge new bags onto existing order (default). replace = overwrite entire items list.',
             },
             color: {
               type: 'string',
@@ -148,12 +154,13 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
             },
             patch: {
               type: 'object',
-              description: 'Advanced patch object for the orders API',
+              description: 'Advanced patch object for the orders API (address/notes)',
             },
             items: {
               type: 'array',
               items: lineItemSchema,
-              description: 'Replacement line items when changing products/colors in bulk',
+              description:
+                'Bags to add (mode=add) or full cart (mode=replace). For add, only include the new bag(s).',
             },
           },
         },

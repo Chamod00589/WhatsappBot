@@ -35,7 +35,13 @@ import {
   type BagOrderIntent,
   type OrderPendingQuotedItem,
 } from './order-intent'
-import { actionEditOrderColor } from './order-edit-intent'
+import {
+  actionEditOrderColor,
+  actionUpdateOrderItems,
+  actionUpdatePendingQuotation,
+  findRecentOrderForPhone,
+  isAddToOrderRequest,
+} from './order-edit-intent'
 import { sendLocalTextQuickReply, sendQuickReplyByCatalogId } from './send-quick-reply'
 import { IDENTIFY_CONFIDENCE_THRESHOLD } from './types'
 import type { ReplyMode } from './language'
@@ -462,39 +468,106 @@ async function execUpdateOrder(
   const targetName =
     typeof a.target_name === 'string' ? a.target_name : null
 
-  if (color && ctx.contactPhone) {
+  const items = await resolveItemsArg(ctx, a.items)
+  const explicitMode =
+    a.mode === 'replace' || a.mode === 'add' ? (a.mode as 'add' | 'replace') : null
+  const mode: 'add' | 'replace' =
+    explicitMode ||
+    (isAddToOrderRequest(ctx.burstText) ? 'add' : items.length ? 'add' : 'replace')
+
+  const recent = await findRecentOrderForPhone(ctx.contactPhone)
+
+  // No live order yet → update last quotation (or send a new one)
+  if (!recent) {
+    if (!items.length && !color) {
+      return {
+        replied: false,
+        handoff: false,
+        note: 'no order and no bag/color changes — ask what to change',
+        resultPayload: { ok: false, need: 'bag_or_color', scope: 'quotation' },
+      }
+    }
+    const r = await actionUpdatePendingQuotation({
+      db: ctx.db,
+      accountId: ctx.accountId,
+      conversationId: ctx.conversationId,
+      contactId: ctx.contactId,
+      configOwnerUserId: ctx.configOwnerUserId,
+      useSinglish: ctx.useSinglish,
+      mode,
+      items: items.length ? items : undefined,
+      color,
+      targetName,
+    })
+    return {
+      replied: r.ok,
+      handoff: false,
+      note: r.message,
+      resultPayload: {
+        ok: r.ok,
+        scope: 'quotation',
+        mode,
+        items: r.items,
+      },
+    }
+  }
+
+  // Color-only change (no new line items) — patch existing lines + confirm screenshot
+  if (color && !items.length) {
     const r = await actionEditOrderColor({
       db: ctx.db,
       accountId: ctx.accountId,
       conversationId: ctx.conversationId,
       contactId: ctx.contactId,
       configOwnerUserId: ctx.configOwnerUserId,
-      contactPhone: ctx.contactPhone,
+      contactPhone: ctx.contactPhone!,
       newColor: color,
       useSinglish: ctx.useSinglish,
       targetName,
     })
-    return { replied: r.ok, handoff: false, note: r.message }
+    return {
+      replied: r.ok,
+      handoff: false,
+      note: r.message,
+      resultPayload: { ok: r.ok, mode: 'color', scope: 'order' },
+    }
   }
 
-  let orderId = typeof a.order_id === 'string' ? a.order_id : ''
+  if (items.length) {
+    const r = await actionUpdateOrderItems({
+      db: ctx.db,
+      accountId: ctx.accountId,
+      conversationId: ctx.conversationId,
+      contactId: ctx.contactId,
+      configOwnerUserId: ctx.configOwnerUserId,
+      contactPhone: ctx.contactPhone,
+      orderId:
+        (typeof a.order_id === 'string' ? a.order_id : null) || recent.id,
+      items,
+      mode,
+    })
+    return {
+      replied: r.ok,
+      handoff: false,
+      note: r.message,
+      resultPayload: { ok: r.ok, mode, items: r.items, scope: 'order' },
+    }
+  }
+
+  // Advanced patch (address / notes / etc.) — still re-send confirm when possible
+  let orderId =
+    (typeof a.order_id === 'string' ? a.order_id : '') || recent.id
   const patch =
     a.patch && typeof a.patch === 'object'
       ? ({ ...(a.patch as Record<string, unknown>) } as Record<string, unknown>)
       : ({} as Record<string, unknown>)
 
-  const items = await resolveItemsArg(ctx, a.items)
-  if (items.length) {
-    patch.items = items.map((it) => ({
-      productId: it.productId,
-      name: it.name,
-      color: it.color,
-      quantity: it.qty,
-      price: it.price,
-    }))
+  if (!Object.keys(patch).length) {
+    return { replied: false, handoff: false, note: 'empty patch' }
   }
 
-  if (!orderId && ctx.contactPhone) {
+  const r = await actionEditOrder({ orderId, patch })
+  if (r.ok && ctx.contactPhone) {
     try {
       const { fetchOrderByPhone } = await import(
         '@/lib/orders/ladiesbags-orders'
@@ -503,22 +576,32 @@ async function execUpdateOrder(
         phone: ctx.contactPhone,
         days: 7,
         whatsappOnly: false,
-      })) as { order?: { id?: string } }
-      if (fresh?.order?.id) orderId = String(fresh.order.id)
-    } catch {
-      /* ignore */
+      })) as { order?: Record<string, unknown> }
+      if (fresh?.order) {
+        const { sendOrderConfirmScreenshot } = await import(
+          './order-screenshot'
+        )
+        const { addNamedTag } = await import('./tags')
+        await sendOrderConfirmScreenshot({
+          db: ctx.db,
+          accountId: ctx.accountId,
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          configOwnerUserId: ctx.configOwnerUserId,
+          order: fresh.order,
+        })
+        await addNamedTag(ctx.db, ctx.accountId, ctx.contactId, 'Pending')
+      }
+    } catch (err) {
+      console.warn('[sales-agent] post-patch confirm screenshot failed:', err)
     }
   }
-
-  if (!orderId) {
-    return { replied: false, handoff: false, note: 'missing order_id' }
+  return {
+    replied: r.ok,
+    handoff: false,
+    note: r.message,
+    resultPayload: { ok: r.ok, scope: 'order' },
   }
-  if (!Object.keys(patch).length) {
-    return { replied: false, handoff: false, note: 'empty patch' }
-  }
-
-  const r = await actionEditOrder({ orderId, patch })
-  return { replied: r.ok, handoff: false, note: r.message }
 }
 
 async function execAnswerCustomQr(

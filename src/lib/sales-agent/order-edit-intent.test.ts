@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   extractEditColor,
+  isAddToOrderRequest,
   isMostlyColorAsk,
   isOrderEditRequest,
+  mergeOrderItemsAdd,
+  mergePendingItemsAdd,
 } from './order-edit-intent'
 import { matchCustomQuickReplies, type CustomQuickReply } from './match-custom-qr'
 import {
@@ -27,6 +30,101 @@ describe('order-edit-intent', () => {
 
   it('does not treat price asks as edits', () => {
     expect(isOrderEditRequest('bloom black bag price kohomda')).toBe(false)
+  })
+
+  it('detects add-another-bag asks', () => {
+    expect(
+      isAddToOrderRequest(
+        'Mata mekata mini sholder white bag ekakuth add karaganna oni',
+      ),
+    ).toBe(true)
+    expect(isAddToOrderRequest('thawa bunny bag ekak add karanna')).toBe(true)
+    expect(isAddToOrderRequest('price kohomada')).toBe(false)
+  })
+
+  it('merges added bags onto existing order lines without dropping them', () => {
+    const merged = mergeOrderItemsAdd(
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: 'Brown',
+          quantity: 2,
+          price: 2500,
+        },
+      ],
+      [
+        {
+          productId: 'mini',
+          name: 'Mini Shoulder Bag',
+          color: 'White',
+          quantity: 1,
+          price: 1800,
+        },
+      ],
+    )
+    expect(merged).toHaveLength(2)
+    expect(merged.map((i) => i.name).sort()).toEqual([
+      'Cloudy Shoulder Bag',
+      'Mini Shoulder Bag',
+    ])
+    expect(
+      merged.find((i) => i.name === 'Cloudy Shoulder Bag')?.quantity,
+    ).toBe(2)
+    expect(
+      merged.find((i) => i.name === 'Mini Shoulder Bag')?.color,
+    ).toBe('White')
+  })
+
+  it('sums qty when adding the same product+color again', () => {
+    const merged = mergeOrderItemsAdd(
+      [
+        {
+          productId: 'mini',
+          name: 'Mini Shoulder Bag',
+          color: 'White',
+          quantity: 1,
+          price: 1800,
+        },
+      ],
+      [
+        {
+          productId: 'mini',
+          name: 'Mini Shoulder Bag',
+          color: 'White',
+          quantity: 1,
+          price: 1800,
+        },
+      ],
+    )
+    expect(merged).toHaveLength(1)
+    expect(merged[0].quantity).toBe(2)
+  })
+
+  it('merges pending quotation lines when adding a bag pre-order', () => {
+    const merged = mergePendingItemsAdd(
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: 'Brown',
+          qty: 2,
+          price: 2500,
+        },
+      ],
+      [
+        {
+          productId: 'mini',
+          name: 'Mini Shoulder Bag',
+          color: 'White',
+          qty: 1,
+          price: 1800,
+        },
+      ],
+    )
+    expect(merged).toHaveLength(2)
+    expect(merged.find((i) => i.name.includes('Cloudy'))?.qty).toBe(2)
+    expect(merged.find((i) => i.name.includes('Mini'))?.color).toBe('White')
   })
 })
 
@@ -83,7 +181,6 @@ describe('matchCustomQuickReplies description matching', () => {
     content_text: null,
     catalog_message_id: 'qm_white',
     product_id: null,
-    needles: ['white bags'],
   }
 
   it('does not match White bags FAQ for color-edit asks', () => {
