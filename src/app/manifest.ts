@@ -9,8 +9,8 @@ import type { MetadataRoute } from 'next'
 export default function manifest(): MetadataRoute.Manifest {
   return {
     id: '/',
-    name: 'wacrm',
-    short_name: 'wacrm',
+    name: 'LB Whatsapp',
+    short_name: 'LB Whatsapp',
     description: 'WhatsApp CRM inbox',
     start_url: '/',
     scope: '/',

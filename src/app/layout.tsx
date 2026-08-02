@@ -25,7 +25,7 @@ export const metadata: Metadata = {
     default: "wacrm",
     template: "%s — wacrm",
   },
-  applicationName: "wacrm",
+  applicationName: "LB Whatsapp",
   description: "Self-hostable CRM template for WhatsApp.",
   robots: {
     index: false,
@@ -37,7 +37,7 @@ export const metadata: Metadata = {
   },
   appleWebApp: {
     capable: true,
-    title: "wacrm",
+    title: "LB Whatsapp",
     statusBarStyle: "black-translucent",
   },
   formatDetection: {
