@@ -174,17 +174,24 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'answer_delivery',
         description:
-          'Answer delivery / shipping / how-many-days questions by sending the matching saved delivery quick reply. Prefer this over inventing delivery times.',
+          'Send the saved delivery/shipping FAQ quick reply. YOU must choose the best match from the FAQ list using each item\'s description (e.g. "Deliver Time and price"). Always pass quick_reply_id (or catalog_message_id). If no FAQ fits, call handover_to_human instead.',
         parameters: {
           type: 'object',
           properties: {
-            query: {
+            quick_reply_id: {
               type: 'string',
-              description: 'Short paraphrase of the delivery question for matching',
+              description: 'Required: id of the best matching FAQ from the list',
             },
-            quick_reply_id: { type: 'string' },
-            catalog_message_id: { type: 'string' },
+            catalog_message_id: {
+              type: 'string',
+              description: 'Optional catalog message id if listed',
+            },
+            reason: {
+              type: 'string',
+              description: 'Short why this FAQ matches the customer ask',
+            },
           },
+          required: ['quick_reply_id'],
         },
       },
     })
@@ -194,17 +201,24 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'answer_policy',
         description:
-          'Answer FAQ / policy questions (payment, returns, COD, wholesale hours, etc.) by sending the matching saved quick reply. Match against quick-reply descriptions.',
+          'Send a saved policy/FAQ quick reply (payment, returns, COD, etc.). YOU must choose the best match from the FAQ list by reading descriptions. Always pass quick_reply_id. If none fit, call handover_to_human.',
         parameters: {
           type: 'object',
           properties: {
-            query: {
+            quick_reply_id: {
               type: 'string',
-              description: 'Short paraphrase of the customer question for matching',
+              description: 'Required: id of the best matching FAQ from the list',
             },
-            quick_reply_id: { type: 'string' },
-            catalog_message_id: { type: 'string' },
+            catalog_message_id: {
+              type: 'string',
+              description: 'Optional catalog message id if listed',
+            },
+            reason: {
+              type: 'string',
+              description: 'Short why this FAQ matches',
+            },
           },
+          required: ['quick_reply_id'],
         },
       },
     })

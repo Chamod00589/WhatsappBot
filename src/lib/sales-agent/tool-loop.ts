@@ -36,8 +36,8 @@ import type { CustomQuickReply } from './match-custom-qr'
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 
-/** Max model↔tool rounds so identify → quote can complete in one dispatch. */
-const MAX_TOOL_ROUNDS = 4
+/** Max model↔tool rounds per inbound handle (identify → quote → FAQ, etc.). */
+const MAX_TOOL_ROUNDS = 3
 
 export interface ToolLoopArgs {
   db: SupabaseClient
@@ -105,13 +105,16 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
     .join('\n')
 
   const faqList = customCatalog
-    .slice(0, 40)
-    .map(
-      (q) =>
-        `- ${q.title} | id=${q.id}` +
+    .slice(0, 80)
+    .map((q) => {
+      const desc = (q.description || '').trim() || '(no description)'
+      return (
+        `- ${q.title}\n` +
+        `  id=${q.id}` +
         (q.catalog_message_id ? ` | catalog=${q.catalog_message_id}` : '') +
-        (q.description ? ` | ${q.description.slice(0, 140)}` : ''),
-    )
+        `\n  description: ${desc.slice(0, 400)}`
+      )
+    })
     .join('\n')
 
   const imageNote = args.inboundImages.length
@@ -122,19 +125,25 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
     'You are the Ladies Bags WhatsApp sales agent for ladiesbags.lk.',
     'You are the single decision-maker for this conversation. Read the full recent chat, then call one or more tools to help.',
     'You MAY call multiple tools in the same turn for mixed intents (e.g. find_product + generate_quote + answer_delivery).',
-    'Prefer tools over guessing. Never invent catalog prices, delivery times, or return policies — use generate_quote / answer_delivery / answer_policy.',
+    'You have up to 3 tool rounds this turn. If a tool returns need=quick_reply_id or "not found", pick a better id from the FAQ list and retry — or call handover_to_human.',
+    'Prefer tools over guessing. Never invent catalog prices, delivery times, or return policies.',
+    'FAQ / delivery / policy answers:',
+    '- Read every FAQ description below carefully (Singlish/English).',
+    '- Choose the single most suitable quick reply for the customer question.',
+    '- Call answer_delivery or answer_policy with that quick_reply_id (or catalog_message_id). Do NOT rely on fuzzy text matching — you must pass the id.',
+    '- If NONE of the FAQ descriptions fit the question, call handover_to_human (do not invent an answer).',
     'Flow tips:',
     '- Bag photo → identify_product (send_product_card true unless you need facts only).',
     '- Customer names a bag → find_product.',
     '- Asks price / how much / kochchara → generate_quote (after bags are known).',
     '- Sends name+address+phone with bag+color → create_order.',
     '- Missing color/qty/address → ask_missing_information (short Singlish/Tanglish).',
-    '- Delivery days/shipping FAQ → answer_delivery (not generate_quote).',
-    '- Other FAQ → answer_policy.',
+    '- Delivery fee/time/shipping ("deliver gasthuwa", "dawasak") → answer_delivery with the delivery FAQ id.',
+    '- Other FAQ → answer_policy with the matching FAQ id.',
     '- Confirms pending order (ok/hari/yes) → confirm_order.',
     '- Add another bag / change color before OR after order create → update_order (mode=add for new bags; color for recolor). If no order yet, server updates the last quotation and re-sends it; if no quotation yet, sends a new quotation.',
     '- After an order exists, update_order re-sends the order confirm screenshot.',
-    '- Wholesale, complaints, angry, or unsafe → handover_to_human.',
+    '- Wholesale, complaints, angry, unknown, or no matching FAQ → handover_to_human.',
     languageHintForPrompt(replyMode),
     'Keep ask_missing_information messages short (1–2 sentences). Do not dump long policy text as free messages.',
     `If you cannot help safely, call handover_to_human or reply with exactly ${HANDOFF_SENTINEL}.`,
@@ -147,8 +156,8 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
       ? `Catalog product cards (use find_product / generate_quote):\n${productList}`
       : 'No product cards configured.',
     faqList
-      ? `FAQ / policy / delivery quick replies (use answer_delivery or answer_policy):\n${faqList}`
-      : 'No FAQ quick replies configured.',
+      ? `FAQ / policy / delivery quick replies (YOU pick the best id by description):\n${faqList}`
+      : 'No FAQ quick replies configured — for FAQ/delivery questions call handover_to_human.',
   ]
   return parts.filter(Boolean).join('\n\n')
 }

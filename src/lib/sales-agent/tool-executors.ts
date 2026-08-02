@@ -16,8 +16,8 @@ import {
   resolveIdentifyConfirm,
 } from './identify'
 import {
+  findCustomQuickReply,
   loadCustomQuickReplies,
-  matchCustomQuickReplies,
   type CustomQuickReply,
 } from './match-custom-qr'
 import {
@@ -610,65 +610,83 @@ async function execAnswerCustomQr(
   mode: 'delivery' | 'policy',
 ): Promise<ToolExecResult> {
   const catalogMessageId =
-    typeof a.catalog_message_id === 'string' ? a.catalog_message_id : ''
+    typeof a.catalog_message_id === 'string' ? a.catalog_message_id.trim() : ''
   const quickReplyId =
-    typeof a.quick_reply_id === 'string' ? a.quick_reply_id : ''
-  const query =
-    typeof a.query === 'string' && a.query.trim()
-      ? a.query.trim()
-      : ctx.burstText
-
-  if (catalogMessageId) {
-    await sendQuickReplyByCatalogId({
-      db: ctx.db,
-      accountId: ctx.accountId,
-      conversationId: ctx.conversationId,
-      catalogMessageId,
-      contextSummary: `Sent ${mode} quick reply ${catalogMessageId}`,
-    })
-    return { replied: true, handoff: false, note: `sent catalog ${catalogMessageId}` }
-  }
-
-  if (quickReplyId) {
-    const sent = await sendQrById(ctx, quickReplyId)
-    if (sent) return sent
-  }
+    typeof a.quick_reply_id === 'string' ? a.quick_reply_id.trim() : ''
+  const reason =
+    typeof a.reason === 'string' ? a.reason.trim().slice(0, 200) : ''
 
   const customs =
     ctx.customCatalog.length > 0
       ? ctx.customCatalog
       : await loadCustomQuickReplies(ctx.db, ctx.accountId)
 
-  let matches = matchCustomQuickReplies(query, customs, { minScore: 0.35 })
-  if (mode === 'delivery') {
-    matches = [...matches].sort((a, b) => {
-      const score = (m: (typeof matches)[0]) => {
-        const blob = `${m.qr.title} ${m.qr.description}`.toLowerCase()
-        let s = m.score
-        if (/\b(deliver|delivery|shipping|dawas|days?)\b/.test(blob)) s += 0.35
-        return s
-      }
-      return score(b) - score(a)
-    })
-  }
-
-  const best = matches[0]
-  if (!best || best.score < 0.4) {
+  // LLM must pick from the FAQ list — no synonym/token fuzzy match.
+  if (!quickReplyId && !catalogMessageId) {
     return {
       replied: false,
       handoff: false,
-      note: `no ${mode} quick reply matched`,
-      resultPayload: { matched: false },
+      note: `missing quick_reply_id — pick the best FAQ id from the list, or call handover_to_human if none fit`,
+      resultPayload: {
+        matched: false,
+        need: 'quick_reply_id',
+        available: customs.slice(0, 40).map((q) => ({
+          id: q.id,
+          title: q.title,
+          description: (q.description || '').slice(0, 160),
+          catalog_message_id: q.catalog_message_id,
+        })),
+      },
     }
   }
 
-  const sent = await sendCustomQr(ctx, best.qr)
+  const qr = findCustomQuickReply(customs, {
+    quickReplyId,
+    catalogMessageId,
+  })
+
+  if (!qr) {
+    // Still try raw catalog / DB id send (legacy)
+    if (catalogMessageId) {
+      await sendQuickReplyByCatalogId({
+        db: ctx.db,
+        accountId: ctx.accountId,
+        conversationId: ctx.conversationId,
+        catalogMessageId,
+        contextSummary: reason || `Sent ${mode} quick reply ${catalogMessageId}`,
+      })
+      return {
+        replied: true,
+        handoff: false,
+        note: `sent catalog ${catalogMessageId}`,
+      }
+    }
+    const sent = await sendQrById(ctx, quickReplyId)
+    if (sent) return sent
+    return {
+      replied: false,
+      handoff: false,
+      note: `quick reply not found for id=${quickReplyId || catalogMessageId} — pick another id or handover_to_human`,
+      resultPayload: {
+        matched: false,
+        available: customs.slice(0, 40).map((q) => ({
+          id: q.id,
+          title: q.title,
+          description: (q.description || '').slice(0, 160),
+        })),
+      },
+    }
+  }
+
+  const sent = await sendCustomQr(ctx, qr)
   return {
     ...sent,
     resultPayload: {
       matched: true,
-      title: best.qr.title,
-      score: best.score,
+      title: qr.title,
+      id: qr.id,
+      mode,
+      reason: reason || undefined,
     },
   }
 }
