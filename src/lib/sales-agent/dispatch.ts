@@ -391,8 +391,17 @@ export async function dispatchSalesAgentNow(
               qty: qtyFromReply > 1 ? qtyFromReply : i.qty,
             })),
           )
+          const alreadyReady = (orderPending.readyItems || []).map((it) => ({
+            productId: it.productId,
+            name: it.name,
+            color: it.color || '',
+            qty: it.qty,
+            price: it.price,
+            image: it.image,
+          }))
+          const allItems = [...alreadyReady, ...items]
           log.step('order', 'Pending address + bag/color reply — creating order', {
-            items,
+            items: allItems,
           })
           const r = await actionCreateOrder({
             db,
@@ -401,7 +410,7 @@ export async function dispatchSalesAgentNow(
             contactId,
             configOwnerUserId,
             addressText: orderPending.addressText,
-            items,
+            items: allItems,
             contactPhone,
             useSinglish,
           })
@@ -491,7 +500,16 @@ export async function dispatchSalesAgentNow(
           qty: qtyFromReply > 1 ? qtyFromReply : b.qty,
           quickReplyId: b.quickReplyId,
         }))
-        const items = await resolveLineItems(intents)
+        const coloredNow = await resolveLineItems(intents)
+        const alreadyReady = (orderPending.readyItems || []).map((it) => ({
+          productId: it.productId,
+          name: it.name,
+          color: it.color || '',
+          qty: it.qty,
+          price: it.price,
+          image: it.image,
+        }))
+        const items = [...alreadyReady, ...coloredNow]
         log.step('order', `Color "${color}" received — creating order`, {
           items,
         })
@@ -519,7 +537,7 @@ export async function dispatchSalesAgentNow(
 
     // 2d) Address intake → create order when bag+color known; else ask via QR
     if (config.createOrder && inboundText && shouldRunOrderIntake(inboundText)) {
-      // Prefer exact line items from the last quotation (quote → address flow)
+      // Prefer conversation-saved bags (identify / quote / product ask)
       const quotePending = parseOrderPending(gate.conversation.sa_order_pending)
       if (
         quotePending?.type === 'awaiting_address' &&
@@ -533,11 +551,11 @@ export async function dispatchSalesAgentNow(
           price: it.price,
           image: it.image,
         }))
-        const missingColor = quotedItems.filter((i) => !i.color)
+        const missingColor = quotedItems.filter((i) => !String(i.color || '').trim())
         if (missingColor.length === 0) {
           log.step(
             'order',
-            'Address after quotation — creating order from quoted items',
+            'Address + saved bag details — creating order',
             { items: quotedItems },
           )
           const r = await actionCreateOrder({
@@ -567,6 +585,85 @@ export async function dispatchSalesAgentNow(
             await log.complete()
             return
           }
+        } else {
+          // Bags remembered but color missing — keep address, ask color + send product QR
+          let availableColors: string[] = []
+          const first = missingColor[0]
+          if (first.productId) {
+            try {
+              const p = await fetchCatalogProduct(first.productId)
+              availableColors = p?.colors ?? []
+            } catch {
+              /* ignore */
+            }
+          }
+          const pending: OrderPendingState = {
+            type: 'awaiting_color',
+            bags: missingColor.map((b) => ({
+              productId: b.productId ?? null,
+              catalogMessageId: null,
+              name: b.name,
+              qty: b.qty,
+              quickReplyId: '',
+            })),
+            addressText: inboundText,
+            readyItems: quotedItems.filter((i) =>
+              String(i.color || '').trim(),
+            ),
+            askedAt: new Date().toISOString(),
+          }
+          await db
+            .from('conversations')
+            .update({ sa_order_pending: pending })
+            .eq('id', conversationId)
+
+          for (const bag of missingColor.slice(0, 3)) {
+            const hit = products.find(
+              (p) =>
+                (bag.productId && p.product_id === bag.productId) ||
+                productDisplayName(p.title).toLowerCase() ===
+                  bag.name.toLowerCase(),
+            )
+            if (!hit?.catalog_message_id) continue
+            try {
+              await sendQuickReplyByCatalogId({
+                db,
+                accountId,
+                conversationId,
+                catalogMessageId: hit.catalog_message_id,
+                contextSummary: `Sent product QR while awaiting color for order: ${bag.name}`,
+              })
+            } catch (err) {
+              console.error('[sales-agent] color-ask product QR failed:', err)
+            }
+          }
+
+          const ask = askColorAndQtyText(
+            replyMode,
+            missingColor.map((b) => b.name).join(', '),
+            availableColors,
+          )
+          await engineSendText({
+            accountId,
+            userId: configOwnerUserId,
+            conversationId,
+            contactId,
+            text: ask,
+            aiGenerated: true,
+          })
+          log.step(
+            'order',
+            'Address saved; asked color/qty for remembered bags',
+            { ask, bags: missingColor },
+          )
+          await rememberAnsweredQuestion(db, conversationId, inboundText)
+          await claimSlot(
+            db,
+            conversationId,
+            config.autoReplyMaxPerConversation,
+          )
+          await log.complete()
+          return
         }
       }
 
@@ -591,9 +688,9 @@ export async function dispatchSalesAgentNow(
       if (intents.length === 0) {
         log.step(
           'order',
-          'Address found but no bag in history — ask which product',
+          'Address found but no bag in history — ask which product via QR',
         )
-        // Only resend real product QRs (never FAQ / "Ask Request products")
+        // Product QRs only (never FAQ / "Ask Request products")
         const toOffer = offered
           .filter((o) => Boolean(o.product_id))
           .slice(0, 3)
@@ -610,6 +707,25 @@ export async function dispatchSalesAgentNow(
               })
             } catch (err) {
               console.error('[sales-agent] order ask product QR failed:', err)
+            }
+          }
+        } else if (config.productMatch) {
+          // No recent product in chat — send up to 3 catalog product QRs as options
+          const fallback = products
+            .filter((p) => Boolean(p.product_id && p.catalog_message_id))
+            .slice(0, 3)
+          for (const hit of fallback) {
+            if (!hit.catalog_message_id) continue
+            try {
+              await sendQuickReplyByCatalogId({
+                db,
+                accountId,
+                conversationId,
+                catalogMessageId: hit.catalog_message_id,
+                contextSummary: `Sent product quick reply for ${productDisplayName(hit.title)} (address without bag)`,
+              })
+            } catch (err) {
+              console.error('[sales-agent] fallback product QR failed:', err)
             }
           }
         }

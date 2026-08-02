@@ -95,6 +95,14 @@ Dehiattakandiya
     expect(isAddressLikeMessage(bare)).toBe(true)
   })
 
+  it('detects Dulakshi-style address (name / place / phone, no labels)', () => {
+    const bare = `Dulakshi 
+Thamuttegama 
+Deweni piyawara
+0778851020`
+    expect(isAddressLikeMessage(bare)).toBe(true)
+  })
+
   it('prefers bag+color from chat history over offered when address follows', () => {
     const intents = resolveOrderIntentsForAddress({
       customerTexts: [

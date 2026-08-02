@@ -462,7 +462,14 @@ export function isAddressLikeMessage(text: string): boolean {
   if (!t) return false
 
   const compact = t.replace(/[\s-]/g, '')
-  const hasPhone = /\b0\d{9}\b|\+94\d{9}/.test(compact)
+  // Test phone on original lines too — compacting "…gama077…" removes
+  // word boundaries so `\b0\d{9}\b` fails on glued place+phone strings.
+  const hasPhone =
+    /\b0\d{9}\b/.test(t) ||
+    /\+94\s?\d{9}\b/.test(t) ||
+    /(?:^|[^\d])0\d{9}(?:[^\d]|$)/.test(compact) ||
+    /(?:^|[^\d])94\d{9}(?:[^\d]|$)/.test(compact)
+
   const lines = t
     .split(/\n/)
     .map((l) => l.trim())
@@ -471,7 +478,7 @@ export function isAddressLikeMessage(text: string): boolean {
   const hasHouseNo =
     /\bno\.?\s*\d{1,4}\b|\b\d{1,4}\s*\/\s*\d{0,3}\b|#\s*\d{1,4}\b/i.test(t)
   const hasPlace =
-    /road|lane|street|avenue|junction|pura|watta|gama|city|district|kandiya|mawatha|mw\b|para\b|town|village/i.test(
+    /road|lane|street|avenue|junction|pura|watta|gama|city|district|kandiya|mawatha|mw\b|para\b|piyawara|town|village|temple|kovil|school|hospital|near|opposite/i.test(
       t,
     )
   const hasLabel =
@@ -483,7 +490,7 @@ export function isAddressLikeMessage(text: string): boolean {
   if (hasLabel && (hasPhone || lineCount >= 2)) return true
 
   // Bare block like:
-  // Chamod / No 280 / Uttalapura / Dehiattakandiya / 0779522100
+  // Dulakshi / Thamuttegama / Deweni piyawara / 0778851020
   // (no need to say "this is my address")
   if (hasPhone && lineCount >= 3) return true
   if (hasPhone && lineCount >= 2 && (hasPlace || hasHouseNo)) return true

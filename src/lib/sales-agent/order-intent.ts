@@ -122,11 +122,15 @@ export type OrderPendingState =
       type: 'awaiting_color'
       bags: OrderPendingBag[]
       addressText: string
+      /** Lines that already had color when address arrived (keep as-is). */
+      readyItems?: OrderPendingQuotedItem[]
       askedAt: string
     }
   | {
       type: 'awaiting_address'
       items: OrderPendingQuotedItem[]
+      /** Set when address arrived but color was still missing. */
+      addressText?: string
       askedAt: string
     }
 
@@ -150,11 +154,30 @@ export function parseOrderPending(raw: unknown): OrderPendingState | null {
       }))
       .filter((b) => b.name)
     if (!items.length) return null
-    return { type: 'awaiting_address', items, askedAt }
+    return {
+      type: 'awaiting_address',
+      items,
+      askedAt,
+      addressText:
+        typeof o.addressText === 'string' ? o.addressText : undefined,
+    }
   }
 
   if (o.type !== 'awaiting_color') return null
   if (!Array.isArray(o.bags) || typeof o.addressText !== 'string') return null
+  const readyItems = Array.isArray(o.readyItems)
+    ? o.readyItems
+        .filter((b): b is Record<string, unknown> => !!b && typeof b === 'object')
+        .map((b) => ({
+          productId: typeof b.productId === 'string' ? b.productId : undefined,
+          name: typeof b.name === 'string' ? b.name : 'Bag',
+          color: typeof b.color === 'string' ? b.color : '',
+          qty: Math.max(1, Number(b.qty) || 1),
+          price: Number(b.price) || 0,
+          image: typeof b.image === 'string' ? b.image : undefined,
+        }))
+        .filter((b) => b.name)
+    : undefined
   return {
     type: 'awaiting_color',
     bags: o.bags
@@ -168,6 +191,7 @@ export function parseOrderPending(raw: unknown): OrderPendingState | null {
         quickReplyId: typeof b.quickReplyId === 'string' ? b.quickReplyId : '',
       })),
     addressText: o.addressText,
+    readyItems,
     askedAt,
   }
 }
