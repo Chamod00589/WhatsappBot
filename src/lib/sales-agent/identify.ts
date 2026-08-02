@@ -21,11 +21,18 @@ import {
 } from './match-products'
 import { sendQuickReplyByCatalogId } from './send-quick-reply'
 import { identifyRejectText, identifyConfirmAskText } from './identify-text'
-import type { OrderPendingQuotedItem } from './order-intent'
 import {
   assignQtysToImageLines,
   extractColorsFromText,
+  extractExplicitQty,
+  extractOrderIntents,
+  looksLikeNamedProductLine,
+  parseOrderPending,
+  quotedItemsFromPending,
+  resolveLineItems,
+  toPendingQuotedItems,
   upsertAwaitingAddressItems,
+  type OrderPendingQuotedItem,
 } from './order-intent'
 
 export { identifyRejectText } from './identify-text'
@@ -156,6 +163,8 @@ export async function handleInboundIdentifyMany(args: {
   sentQr: boolean
   qrCount: number
   identified: Array<{ product: string; color: string; confidence: number }>
+  /** Bags saved into chat memory after identify + burst named lines. */
+  savedItems?: OrderPendingQuotedItem[]
 }> {
   const {
     db,
@@ -274,7 +283,47 @@ export async function handleInboundIdentifyMany(args: {
       }
       await upsertAwaitingAddressItems(db, conversationId, quotedItems)
     }
-    return { handled: true, sentQr: true, qrCount, identified }
+
+    // Also merge named bags from the same burst (e.g. "Mini shoulder red 1i")
+    // that were not part of the image caption.
+    const extraLines = burstText
+      .split(/\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && looksLikeNamedProductLine(l))
+    if (extraLines.length) {
+      try {
+        const intents = extractOrderIntents(extraLines, catalog)
+        if (intents.length) {
+          const extras = await resolveLineItems(intents)
+          if (extras.length) {
+            await upsertAwaitingAddressItems(
+              db,
+              conversationId,
+              toPendingQuotedItems(extras),
+            )
+          }
+        }
+      } catch (err) {
+        console.warn('[sales-agent] merge burst named bags failed:', err)
+      }
+    }
+
+    const { data: convAfter } = await db
+      .from('conversations')
+      .select('sa_order_pending')
+      .eq('id', conversationId)
+      .maybeSingle()
+    const savedItems = quotedItemsFromPending(
+      parseOrderPending(convAfter?.sa_order_pending),
+    )
+
+    return {
+      handled: true,
+      sentQr: true,
+      qrCount,
+      identified,
+      savedItems,
+    }
   }
 
   // No high-confidence QR — ask confirm for the strongest single match
@@ -459,7 +508,7 @@ async function buildQuotedItemFromIdentify(
     productId,
     name,
     color: color || '',
-    qty: 1,
+    qty: extractExplicitQty(caption || '') ?? 1,
     price,
     image,
   }

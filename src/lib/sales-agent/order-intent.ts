@@ -276,6 +276,13 @@ export function extractExplicitQty(text: string): number | null {
     }
   }
 
+  // "1i" / "2i" — common WhatsApp typo for 1k / ekak
+  const iMatch = t.match(/\b(\d{1,2})\s*i\b/)
+  if (iMatch) {
+    const n = Number(iMatch[1])
+    if (n >= 1 && n <= 20) return n
+  }
+
   const explicit =
     t.match(/\b(?:qty|quantity|x)\s*[:=]?\s*(\d{1,2})\b/) ||
     t.match(/\b(\d{1,2})\s*(?:x|bags?|pcs?|pieces?)\b/) ||
@@ -285,6 +292,9 @@ export function extractExplicitQty(text: string): number | null {
     if (n >= 1 && n <= 50) return n
   }
 
+  if (/\b(ekak|eka\s*oni|one)\b/.test(t) && !/\b(dekak|thunak|2|3|4|5)\b/.test(t)) {
+    return 1
+  }
   if (/\b(dekak|dekhak|two)\b/.test(t)) return 2
   if (/\b(thunak|three)\b/.test(t)) return 3
   if (/\b(hatarak|hatharak|four)\b/.test(t)) return 4
@@ -308,6 +318,10 @@ export function extractAllQtys(text: string): number[] {
   const out: number[] = []
 
   for (const m of t.matchAll(/\b(\d{1,2})\s*k\b/g)) {
+    const n = Number(m[1])
+    if (n >= 1 && n <= 20) out.push(n)
+  }
+  for (const m of t.matchAll(/\b(\d{1,2})\s*i\b/g)) {
     const n = Number(m[1])
     if (n >= 1 && n <= 20) out.push(n)
   }
@@ -387,6 +401,77 @@ export function assignQtysToImageLines(
   }
 
   return out
+}
+
+/**
+ * Text that refers to the photo just sent ("me bag", "meka 2k") — belongs
+ * as an image caption, not a separate named-product ask.
+ */
+export function looksLikeImageReferentialText(text: string): boolean {
+  const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (!t) return false
+  return (
+    /\b(meka|me\s+bag|this\s+bag|that\s+bag|me\s+eka|eka\s+meka)\b/.test(t) ||
+    /\b(me\s+bag|bag\s+eka)\s*\d{0,2}\s*k?\b/.test(t) ||
+    /^(ok|hari|yes|ow)\b/.test(t)
+  )
+}
+
+/**
+ * Text that names a different bag (e.g. "Mini shoulder red 1i oni") and
+ * should NOT be glued onto the previous image caption.
+ */
+export function looksLikeNamedProductLine(text: string): boolean {
+  const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (!t) return false
+  if (looksLikeImageReferentialText(t)) return false
+
+  // Common catalog tokens / bag words + color or qty cue
+  const namedBag =
+    /\b(mini|bloom|cloudy|bunny|pouch|shoulder|cross\s*body|tote|sling|handbag)\b/.test(
+      t,
+    ) || /\b[a-z]{3,}\s+(shoulder|bag|pouch)\b/.test(t)
+  const hasColor = extractColorsFromText(t).length > 0
+  const hasQty = extractExplicitQty(t) != null
+  const buyCue = /\b(oni|onne|ganna|ganne|venum|want)\b/.test(t)
+
+  if (namedBag && (hasColor || hasQty || buyCue)) return true
+  if (namedBag && t.split(' ').length >= 2) return true
+  return false
+}
+
+/**
+ * Prefer conversation-saved quotation/identify colors (and qty/price) when
+ * the model invents a different color for the same bag.
+ */
+export function applyPendingOverridesToItems(
+  items: OrderLineItem[],
+  pending: OrderPendingQuotedItem[],
+): OrderLineItem[] {
+  if (!items.length || !pending.length) return items
+  return items.map((it) => {
+    const name = normalizeMatchText(it.name)
+    const match = pending.find((p) => {
+      const pn = normalizeMatchText(p.name)
+      return (
+        pn === name ||
+        pn.includes(name) ||
+        name.includes(pn) ||
+        (it.productId && p.productId && it.productId === p.productId)
+      )
+    })
+    if (!match) return it
+    const pendingColor = String(match.color || '').trim()
+    return {
+      ...it,
+      productId: it.productId || match.productId,
+      name: match.name || it.name,
+      color: pendingColor || it.color || '',
+      qty: it.qty >= 1 ? it.qty : match.qty || 1,
+      price: it.price > 0 ? it.price : match.price || 0,
+      image: it.image || match.image,
+    }
+  })
 }
 
 /**

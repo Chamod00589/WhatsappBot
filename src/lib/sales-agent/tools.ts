@@ -73,6 +73,10 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
               type: 'string',
               description: 'Remembered color for later order/quote if known',
             },
+            quantity: {
+              type: 'number',
+              description: 'How many pieces (e.g. 2 from \"2k\" / 1 from \"1i\")',
+            },
           },
         },
       },

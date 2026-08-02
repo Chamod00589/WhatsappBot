@@ -2,6 +2,10 @@ import { supabaseAdmin } from '@/lib/ai/admin-client'
 import type { SalesAgentDispatchArgs } from './types'
 import { dispatchSalesAgentNow } from './dispatch'
 import { findTestMarkerCutoff } from './gates'
+import {
+  looksLikeImageReferentialText,
+  looksLikeNamedProductLine,
+} from './order-intent'
 
 /** Quiet period after the last inbound before one Sales Agent pass.
  *  Each new message resets this timer (wait again 10s). */
@@ -298,7 +302,15 @@ async function mergeBurstArgs(
       inboundImages.push(slot)
       lastImage = slot
     } else if (lastImage) {
-      // Text after an image belongs to that image until the next image arrives
+      // Only glue "this photo" lines onto the image caption.
+      // Named product asks ("Mini shoulder red 1i") stay in burst text only.
+      if (
+        looksLikeNamedProductLine(ev.text) &&
+        !looksLikeImageReferentialText(ev.text)
+      ) {
+        lastImage = null
+        continue
+      }
       appendCaption(lastImage, ev.text)
     }
   }

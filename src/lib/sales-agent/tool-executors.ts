@@ -27,6 +27,8 @@ import {
   type MatchableQuickReply,
 } from './match-products'
 import {
+  applyPendingOverridesToItems,
+  extractOrderIntents,
   parseOrderPending,
   productDisplayName,
   resolveLineItems,
@@ -187,11 +189,18 @@ async function execIdentifyProduct(
       burstText: ctx.burstText,
       useSinglish: ctx.useSinglish,
     })
+    const saved = (r.savedItems || []).map((it) => ({
+      name: it.name,
+      color: it.color || '',
+      qty: it.qty,
+      productId: it.productId,
+      price: it.price,
+    }))
     return {
       replied: r.handled,
       handoff: false,
       note: r.sentQr
-        ? `identified + sent ${r.qrCount} product card(s)`
+        ? `identified + sent ${r.qrCount} product card(s); saved ${saved.length} line(s) in memory`
         : r.handled
           ? 'identified — asked customer to confirm'
           : 'identify produced no match',
@@ -199,6 +208,9 @@ async function execIdentifyProduct(
         identified: r.identified,
         sentQr: r.sentQr,
         qrCount: r.qrCount,
+        saved_items: saved,
+        next:
+          'Use saved_items colors/qty for generate_quote / create_order. Call find_product only for bags not already in saved_items.',
       },
     }
   }
@@ -262,6 +274,8 @@ async function execFindProduct(
   const productName =
     typeof a.product_name === 'string' ? a.product_name.trim() : ''
   const color = typeof a.color === 'string' ? a.color.trim() : ''
+  const qtyRaw = Number(a.quantity ?? a.qty)
+  const qty = Number.isFinite(qtyRaw) && qtyRaw >= 1 ? Math.min(50, qtyRaw) : 1
 
   let hit: MatchableQuickReply | null = null
 
@@ -309,7 +323,7 @@ async function execFindProduct(
       catalogMessageId: hit.catalog_message_id,
       name: display,
       color: color || null,
-      qty: 1,
+      qty,
       quickReplyId: hit.id,
     }
     const items = await resolveLineItems([intent])
@@ -334,6 +348,7 @@ async function execFindProduct(
       product_id: hit.product_id,
       catalog_message_id: hit.catalog_message_id,
       color: color || null,
+      quantity: qty,
     },
   }
 }
@@ -891,7 +906,59 @@ async function resolveItemsArg(
     }
   })
 
-  return resolveLineItems(intents.filter((i) => i.name))
+  let items = await resolveLineItems(intents.filter((i) => i.name))
+
+  // Prefer colors/qty saved from identify / prior quote over model guesses
+  try {
+    const pending = await loadPendingQuoted(ctx)
+    if (pending.length) {
+      items = applyPendingOverridesToItems(items, pending)
+      // Re-resolve images for corrected colors
+      items = await resolveLineItems(
+        items.map(
+          (it) =>
+            ({
+              productId: it.productId ?? null,
+              catalogMessageId: null,
+              name: it.name,
+              color: it.color || null,
+              qty: it.qty,
+              quickReplyId: '',
+            }) satisfies BagOrderIntent,
+        ),
+      )
+    }
+  } catch {
+    /* keep resolved items */
+  }
+
+  return items
+}
+
+async function loadPendingQuoted(
+  ctx: ToolExecContext,
+): Promise<OrderPendingQuotedItem[]> {
+  const { data: conv } = await ctx.db
+    .from('conversations')
+    .select('sa_order_pending')
+    .eq('id', ctx.conversationId)
+    .maybeSingle()
+  const pending = parseOrderPending(conv?.sa_order_pending)
+  if (!pending) return []
+  if (pending.type === 'awaiting_address') return pending.items || []
+  if (pending.type === 'awaiting_color') {
+    return [
+      ...(pending.readyItems || []),
+      ...pending.bags.map((b) => ({
+        productId: b.productId || undefined,
+        name: b.name,
+        color: '',
+        qty: b.qty,
+        price: 0,
+      })),
+    ]
+  }
+  return []
 }
 
 async function loadPendingItems(

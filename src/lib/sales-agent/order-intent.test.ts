@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyPendingOverridesToItems,
   extractOrderIntents,
   extractQty,
+  looksLikeImageReferentialText,
+  looksLikeNamedProductLine,
   parseColorOnlyReply,
   productDisplayName,
   resolveOrderIntentsForAddress,
@@ -31,6 +34,36 @@ describe('order-intent', () => {
     expect(extractQty('thunak bag oni')).toBe(3)
     expect(extractQty('qty 4')).toBe(4)
     expect(extractQty('mata bag ekak oni')).toBe(1)
+    expect(extractQty('Mini sholder red 1i oni')).toBe(1)
+    expect(extractQty('Mata me bag 2k oni')).toBe(2)
+  })
+
+  it('splits image-referential captions from named product lines', () => {
+    expect(looksLikeImageReferentialText('Mata me bag 2k oni')).toBe(true)
+    expect(looksLikeImageReferentialText('meka white karanna')).toBe(true)
+    expect(looksLikeNamedProductLine('Mini sholder red 1i oni')).toBe(true)
+    expect(looksLikeNamedProductLine('Mata me bag 2k oni')).toBe(false)
+  })
+
+  it('prefers pending identify color over wrong model color', () => {
+    const fixed = applyPendingOverridesToItems(
+      [
+        { name: 'Bloom Shoulder Bag', color: 'black', qty: 2, price: 2500 },
+        { name: 'Mini Shoulder Bag', color: 'red', qty: 1, price: 1800 },
+      ],
+      [
+        {
+          productId: 'bloom',
+          name: 'Bloom Shoulder Bag',
+          color: 'White',
+          qty: 2,
+          price: 2500,
+        },
+      ],
+    )
+    expect(fixed[0].color).toBe('White')
+    expect(fixed[0].qty).toBe(2)
+    expect(fixed[1].color).toBe('red')
   })
 
   it('uses per-message qty when multiple bags mentioned separately', () => {
