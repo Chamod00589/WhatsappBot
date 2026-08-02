@@ -30,6 +30,40 @@ export type QuotationImageInput = {
 }
 
 /**
+ * True when the customer is asking how long delivery takes
+ * (e.g. "Deliver karanna kocchara dawasak yanwada") — not bag prices.
+ */
+export function isDeliveryTimeAsk(text: string): boolean {
+  const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (!t) return false
+
+  const hasDelivery =
+    /\b(deliver|delivery|shipping|dispatch|courier)\b/.test(t) ||
+    /\b(deliver|delivery)\s*karanna\b/.test(t) ||
+    /\bpost\s*karanna\b/.test(t)
+
+  const hasDuration =
+    /\b(dawasak|dawas|days?|day|week|weeks|hour|hours|kalayak)\b/.test(t) ||
+    /\b(yanwada|yanawada|kiyanawada)\b/.test(t) ||
+    /\b(take|takes|long|duration|eta)\b/.test(t)
+
+  const howMuch =
+    /\b(kocchara|kochchara|kochcara|kohomada|kohanada|kiyanna|evlo)\b/.test(t)
+
+  // Classic: deliver + how many days
+  if (hasDelivery && hasDuration) return true
+  // "deliver ... kochchara" without saying "price" / bag buy
+  if (
+    hasDelivery &&
+    howMuch &&
+    !/\b(price|prices|quotation|quote|bag|bags|ganna\s+oni)\b/.test(t)
+  ) {
+    return true
+  }
+  return false
+}
+
+/**
  * True when the customer is asking for prices / a quotation
  * (Singlish, Tanglish, or English), not just browsing a bag.
  */
@@ -37,21 +71,39 @@ export function isQuotationRequest(text: string): boolean {
   const t = text.toLowerCase()
   if (!t.trim()) return false
 
-  const priceCue =
-    /\b(price|prices|quotation|quote|rate|rates|cost|amount)\b/.test(t) ||
-    /\b(kohomada|kohanada|kochchara|kochcara|kiyanna|kiyanawada|kiyala\s+denna)\b/.test(
-      t,
-    ) ||
-    /\b(evlo|evvalavu|price\s+sollu|rate\s+sollu)\b/.test(t) ||
-    (/\b(ganna\s+oni|ganne|ganna)\b/.test(t) &&
-      /\b(price|kohomada|kohanada|kochchara|evlo)\b/.test(t)) ||
-    (/\b(me\s+bags?\s+\d+|bags?\s+\d+\s+ganna)\b/.test(t) &&
-      /\b(price|kohomada|kohanada|kochchara|evlo|kiyanna)\b/.test(t)) ||
-    // Multi-image buy asks: "2k ganna" / "meka 3k" on each photo
-    (/\b\d{1,2}\s*k\b/.test(t) &&
-      /\b(ganna|ganne|oni|onne|bags?|meka|mata)\b/.test(t))
+  // Delivery-time asks share "kochchara" / "kiyanna" with price Singlish —
+  // never treat those as a new quotation.
+  if (isDeliveryTimeAsk(t)) return false
 
-  return priceCue
+  const priceWord =
+    /\b(price|prices|quotation|quote|rate|rates|cost|amount)\b/.test(t)
+  const howMuch =
+    /\b(kohomada|kohanada|kochchara|kochcara|kocchara|kiyanna|kiyanawada|kiyala\s+denna|evlo|evvalavu)\b/.test(
+      t,
+    )
+  const bagBuy =
+    /\b(bag|bags|ganna|ganne|meka|mata)\b/.test(t) ||
+    /\b\d{1,2}\s*k\b/.test(t) ||
+    /\b(ganna\s+oni|ganne)\b/.test(t)
+
+  if (priceWord) return true
+  if (/\b(price\s+sollu|rate\s+sollu)\b/.test(t)) return true
+
+  // "kochchara" alone ≈ price; with bag/buy cues ≈ quotation
+  if (howMuch && bagBuy) return true
+  if (howMuch && !/\b(deliver|delivery|shipping|dawasak|dawas|yanwada)\b/.test(t)) {
+    return true
+  }
+
+  // Multi-image buy asks: "2k ganna" / "meka 3k" on each photo
+  if (
+    /\b\d{1,2}\s*k\b/.test(t) &&
+    /\b(ganna|ganne|oni|onne|bags?|meka|mata)\b/.test(t)
+  ) {
+    return true
+  }
+
+  return false
 }
 
 export { assignQtysToImageLines } from './order-intent'

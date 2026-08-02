@@ -74,6 +74,7 @@ import {
   type OrderPendingState,
 } from './order-intent'
 import {
+  isDeliveryTimeAsk,
   isQuotationRequest,
   resolveQuotationItems,
 } from './quotation-intent'
@@ -319,6 +320,78 @@ export async function dispatchSalesAgentNow(
       conversationId,
       20,
     )
+
+    // 2c0) Delivery-time FAQ — before quotation (shares "kochchara" with price asks)
+    if (
+      config.customQrMatch &&
+      inboundText &&
+      isDeliveryTimeAsk(inboundText)
+    ) {
+      log.step('custom_qr', 'Delivery-time ask — matching delivery Quick Reply')
+      const customs = await loadCustomQuickReplies(db, accountId)
+      const matches = matchCustomQuickReplies(inboundText, customs, {
+        minScore: 0.35,
+      })
+      // Prefer QRs whose description/title mentions delivery/shipping/days
+      const ranked = [...matches].sort((a, b) => {
+        const score = (m: (typeof matches)[0]) => {
+          const blob = `${m.qr.title} ${m.qr.description}`.toLowerCase()
+          let s = m.score
+          if (/\b(deliver|delivery|shipping|dawas|days?)\b/.test(blob)) s += 0.35
+          return s
+        }
+        return score(b) - score(a)
+      })
+      const best = ranked[0]
+      if (best && best.score >= 0.35) {
+        log.step(
+          'custom_qr',
+          `Delivery QR "${best.qr.title}" score=${best.score.toFixed(2)}`,
+        )
+        try {
+          if (best.qr.catalog_message_id) {
+            await sendQuickReplyByCatalogId({
+              db,
+              accountId,
+              conversationId,
+              catalogMessageId: best.qr.catalog_message_id,
+              contextSummary:
+                best.qr.description || `Sent custom QR: ${best.qr.title}`,
+            })
+          } else if (best.qr.kind === 'text' && best.qr.content_text) {
+            await sendLocalTextQuickReply({
+              db,
+              accountId,
+              userId: configOwnerUserId,
+              conversationId,
+              contactId,
+              text: best.qr.content_text,
+              contextSummary:
+                best.qr.description || `Sent quick reply: ${best.qr.title}`,
+            })
+          } else {
+            log.step('custom_qr', 'Delivery QR matched but has no sendable content')
+          }
+          if (best.qr.catalog_message_id || (best.qr.kind === 'text' && best.qr.content_text)) {
+            await rememberAnsweredQuestion(db, conversationId, inboundText)
+            await claimSlot(
+              db,
+              conversationId,
+              config.autoReplyMaxPerConversation,
+            )
+            await log.complete()
+            return
+          }
+        } catch (err) {
+          console.error('[sales-agent] delivery QR send failed:', err)
+        }
+      } else {
+        log.step(
+          'custom_qr',
+          'Delivery-time ask but no matching Quick Reply — will not re-send quotation',
+        )
+      }
+    }
 
     // 2c) Price / quotation request — use burst bags, else saved chat bags
     if (config.quotation && isQuotationRequest(inboundText)) {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assignQtysToImageLines,
+  isDeliveryTimeAsk,
   isQuotationRequest,
   qtyPerLine,
 } from './quotation-intent'
@@ -15,6 +16,21 @@ describe('quotation-intent', () => {
     expect(isQuotationRequest('evlo price sollu')).toBe(true)
     expect(isQuotationRequest('Bloom shoulder bag black')).toBe(false)
     expect(isQuotationRequest('meka 2k ganna oni')).toBe(true)
+  })
+
+  it('does not treat delivery-time asks as quotation', () => {
+    const msg = 'Deliver karanna kocchara dawasak yanwada'
+    expect(isDeliveryTimeAsk(msg)).toBe(true)
+    expect(isQuotationRequest(msg)).toBe(false)
+    expect(
+      isQuotationRequest('Deliver karanna kochchara dawasak yanwada'),
+    ).toBe(false)
+    expect(isQuotationRequest('delivery eka dawasak kiyanna')).toBe(false)
+  })
+
+  it('still treats bare price kochchara as quotation', () => {
+    expect(isQuotationRequest('price kochchara')).toBe(true)
+    expect(isQuotationRequest('kochchara')).toBe(true)
   })
 
   it('qtyPerLine keeps legacy single-qty behaviour', () => {
