@@ -333,8 +333,24 @@ export async function actionSendQuotation(args: {
   if (!items.length) return { ok: false, message: 'No items for quotation' }
 
   const caption = useSinglish
-    ? 'Order karanna oni nam name, address, phone number eka send karanna.'
-    : 'Order pannanum na name, address, phone number anupunga.'
+    ? [
+        'මිලදී ගැනීම සඳහා කරුණාකර පහත විස්තර අප වෙත එවන්න. 😊',
+        '',
+        '📌 නම:',
+        '📌 ලිපිනය:',
+        '📌 ළඟම නගරය:',
+        '📌 දුරකථන අංකය 01:',
+        '📌 දුරකථන අංකය 02 (ඇත්නම්):',
+      ].join('\n')
+    : [
+        'வாங்குவதற்கு, தயவுசெய்து கீழே உள்ள விவரங்களை எங்களுக்கு அனுப்புங்கள். 😊',
+        '',
+        '📌 பெயர்:',
+        '📌 முகவரி:',
+        '📌 அருகிலுள்ள நகரம்:',
+        '📌 தொலைபேசி எண் 01:',
+        '📌 தொலைபேசி எண் 02 (இருந்தால்):',
+      ].join('\n')
 
   const enriched = await enrichQuotationLineItems(db, accountId, items)
 
