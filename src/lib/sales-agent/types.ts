@@ -52,6 +52,11 @@ export interface SalesAgentDispatchArgs {
   }>
   /** True when this is the contact's first-ever inbound. */
   isFirstInboundMessage?: boolean
+  /**
+   * Internal messages.id the customer swipe-replied to (WhatsApp context.id
+   * resolved). Used so "me color eken" applies to that product image's color.
+   */
+  replyToMessageId?: string | null
 }
 
 export interface IdentifyPendingState {

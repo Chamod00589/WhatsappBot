@@ -819,6 +819,7 @@ async function processMessage(
             ? message.sticker.id
             : null,
       isFirstInboundMessage,
+      replyToMessageId: replyToInternalId,
     })
   }
 

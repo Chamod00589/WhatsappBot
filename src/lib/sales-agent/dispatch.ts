@@ -21,6 +21,10 @@ import { runSalesAgentToolLoop } from './tool-loop'
 import { loadAgentCatalogs } from './tool-executors'
 import { SalesAgentRunLogger } from './debug-log'
 import { rememberAnsweredQuestion } from './dedupe'
+import {
+  applyReplyReferenceToPending,
+  resolveReplyReference,
+} from './reply-reference'
 
 /**
  * Sales Agent entry — LLM-first architecture.
@@ -62,6 +66,11 @@ export async function dispatchSalesAgentNow(
       : mediaUrl || metaMediaId
         ? [{ mediaUrl, metaMediaId }]
         : []
+
+  const replyToMessageId =
+    typeof args.replyToMessageId === 'string' && args.replyToMessageId.trim()
+      ? args.replyToMessageId.trim()
+      : null
 
   const db = supabaseAdmin()
   const log = new SalesAgentRunLogger(db, {
@@ -252,12 +261,63 @@ export async function dispatchSalesAgentNow(
       typeof contact?.phone === 'string' ? contact.phone : null
 
     const { products, customs } = await loadAgentCatalogs(db, accountId)
-    const systemExtra = buildSessionStateExtra({
-      orderPending: gate.conversation.sa_order_pending,
-      identifyPending: gate.conversation.sa_identify_pending,
-      inboundImages: inboundImages.length,
-      burstText: inboundText,
-    })
+
+    // Swipe-reply to a product QR image ("me color eken") → resolve that
+    // image's bag+color and overwrite older identify memory (e.g. Brown→White).
+    let replyRefNote = ''
+    let orderPendingForExtra = gate.conversation.sa_order_pending
+    if (replyToMessageId && inboundText.trim()) {
+      try {
+        const ref = await resolveReplyReference({
+          db,
+          accountId,
+          conversationId,
+          replyToMessageId,
+          inboundText,
+        })
+        if (ref?.productName) {
+          await applyReplyReferenceToPending({
+            db,
+            conversationId,
+            ref,
+          })
+          const { data: convFresh } = await db
+            .from('conversations')
+            .select('sa_order_pending')
+            .eq('id', conversationId)
+            .maybeSingle()
+          orderPendingForExtra = convFresh?.sa_order_pending ?? orderPendingForExtra
+          replyRefNote =
+            `Customer swipe-replied to a product message — use THIS bag/color (not an older identify):\n` +
+            `${ref.productName} / ${ref.color || '—'} x${ref.qty || 1} (source=${ref.source}).`
+          log.step('reply_ref', replyRefNote, ref)
+        } else {
+          log.step(
+            'reply_ref',
+            'Customer replied to a message but no bag/color could be resolved',
+            { replyToMessageId },
+          )
+        }
+      } catch (err) {
+        console.warn('[sales-agent] reply reference resolve failed:', err)
+        log.step(
+          'reply_ref',
+          `Reply resolve failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
+    const systemExtra = [
+      buildSessionStateExtra({
+        orderPending: orderPendingForExtra,
+        identifyPending: gate.conversation.sa_identify_pending,
+        inboundImages: inboundImages.length,
+        burstText: inboundText,
+      }),
+      replyRefNote,
+    ]
+      .filter(Boolean)
+      .join('\n\n')
 
     const loopMessages = messages.length
       ? messages

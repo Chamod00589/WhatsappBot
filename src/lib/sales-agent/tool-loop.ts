@@ -134,6 +134,7 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
     '- If NONE of the FAQ descriptions fit the question, call handover_to_human (do not invent an answer).',
     'Flow tips:',
     '- Bag photo → identify_product (send_product_card true). Caption text about THIS photo ("me bag 2k", "meka white") applies qty/color to that bag. Other named bags in the same burst ("Mini red 1i") are also saved — use saved_items from the tool result for quote/order colors (do not invent black/white).',
+    '- If the customer swipe-replies to a product QR image and says "me color eken" / price — Session state lists the replied bag+color. ALWAYS use that color for generate_quote / create_order (ignore older identify colors).',
     '- Customer names a bag → find_product (pass color + quantity when known).',
     '- Asks price / how much / kochchara → generate_quote using saved_items / correct colors from identify (never guess a different color than identify returned).',
     '- Sends name+address+phone with bag+color → create_order using the same saved colors/qty.',
