@@ -346,8 +346,22 @@ function InboxPageInner() {
           );
         }
       }
+
+      if (event.eventType === "DELETE") {
+        const deletedId = (event.old?.id ?? conv?.id) as string | undefined;
+        if (!deletedId) return;
+        knownConvIdsRef.current.delete(deletedId);
+        setConversations((prev) => prev.filter((c) => c.id !== deletedId));
+        if (activeConversation?.id === deletedId) {
+          setActiveConversation(null);
+          setActiveContact(null);
+          setMessages([]);
+          autoSelectedForDeepLinkRef.current = null;
+          router.replace("/inbox", { scroll: false });
+        }
+      }
     },
-    [activeConversation, hydrateConversation]
+    [activeConversation, hydrateConversation, router]
   );
 
   // Subscribe to realtime. The `isConnected` flag below feeds the
@@ -514,6 +528,16 @@ function InboxPageInner() {
     router.replace("/inbox", { scroll: false });
   }, [router]);
 
+  const handleConversationDeleted = useCallback(
+    (conversationId: string) => {
+      knownConvIdsRef.current.delete(conversationId);
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+      setMobileContactOpen(false);
+      handleCloseConversation();
+    },
+    [handleCloseConversation],
+  );
+
 
   const handleMessagesLoaded = useCallback((loaded: Message[]) => {
     setMessages(loaded);
@@ -637,6 +661,7 @@ function InboxPageInner() {
             contactPanelOpen={contactPanelOpen}
             onToggleContactPanel={handleToggleContactPanel}
             onOpenMobileContact={handleOpenMobileContact}
+            onDeleted={handleConversationDeleted}
           />
         </div>
 
@@ -667,6 +692,7 @@ function InboxPageInner() {
                       onStatusChange: handleStatusChange,
                       onAssignChange: handleAssignChange,
                       onRefresh: handleManualRefresh,
+                      onDeleted: handleConversationDeleted,
                     }
                   : null
               }

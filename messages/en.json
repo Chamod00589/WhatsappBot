@@ -172,7 +172,14 @@
       "selectConversation": "Select a conversation",
       "selectConversationHint": "Choose a conversation from the left to start messaging",
       "today": "Today",
-      "yesterday": "Yesterday"
+      "yesterday": "Yesterday",
+      "deleteChat": "Delete chat",
+      "deleteChatTitle": "Delete this chat?",
+      "deleteChatDescription": "Removes all messages and stored media in this chat. The contact is kept — a new empty chat will open if they message again.",
+      "deleteChatConfirm": "Delete chat",
+      "deleteChatCancel": "Cancel",
+      "toastChatDeleted": "Chat deleted",
+      "toastChatDeleteFailed": "Failed to delete chat"
     },
     "sessionTimer": {
       "expired": "Expired",

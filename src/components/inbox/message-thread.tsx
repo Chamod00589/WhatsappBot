@@ -104,6 +104,8 @@ interface MessageThreadProps {
   onToggleContactPanel?: () => void;
   /** Mobile: open the contact sheet (tags, notes, deals). */
   onOpenMobileContact?: () => void;
+  /** After hard-delete chat — parent clears selection and list row. */
+  onDeleted?: (conversationId: string) => void;
 }
 
 function formatDateSeparator(dateStr: string, t: ReturnType<typeof useTranslations>): string {
@@ -148,6 +150,7 @@ export function MessageThread({
   contactPanelOpen,
   onToggleContactPanel,
   onOpenMobileContact,
+  onDeleted,
 }: MessageThreadProps) {
   const t = useTranslations("Inbox.messageThread");
   const tTimer = useTranslations("Inbox.sessionTimer");
@@ -970,6 +973,7 @@ export function MessageThread({
               onStatusChange={onStatusChange}
               onAssignChange={onAssignChange}
               onRefresh={onRefresh}
+              onDeleted={onDeleted}
               layout="inline"
               className="hidden lg:flex"
             />

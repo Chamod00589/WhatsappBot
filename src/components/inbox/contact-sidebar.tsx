@@ -48,6 +48,7 @@ interface ContactSidebarProps {
       assignedAgentId: string | null,
     ) => void;
     onRefresh?: () => void;
+    onDeleted?: (conversationId: string) => void;
   } | null;
   /** Bump when the sheet opens so tags refetch after header edits. */
   tagsRefreshKey?: number;
@@ -191,6 +192,7 @@ export function ContactSidebar({
                   onStatusChange={conversationControls.onStatusChange}
                   onAssignChange={conversationControls.onAssignChange}
                   onRefresh={conversationControls.onRefresh}
+                  onDeleted={conversationControls.onDeleted}
                   layout="row"
                 />
               </div>

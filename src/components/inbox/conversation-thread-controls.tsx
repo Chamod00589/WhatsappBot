@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
+  Loader2,
   RefreshCw,
+  Trash2,
   UserPlus,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
@@ -12,11 +14,22 @@ import { toast } from "sonner";
 
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
+import { useCan } from "@/hooks/use-can";
 import { usePresence } from "@/hooks/use-presence";
 import { PresenceDot } from "@/components/presence/presence-dot";
 import { presenceLabel } from "@/lib/presence";
 import { cn } from "@/lib/utils";
 import type { ConversationStatus, Profile } from "@/types";
+import { Button } from "@/components/ui/button";
+import { GatedButton } from "@/components/ui/gated-button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -45,14 +58,16 @@ export interface ConversationThreadControlsProps {
     assignedAgentId: string | null,
   ) => void;
   onRefresh?: () => void;
+  /** Called after the chat (messages + media) was hard-deleted. */
+  onDeleted?: (conversationId: string) => void;
   /** `row` stacks controls for the contact panel; `inline` for the header. */
   layout?: "inline" | "row";
   className?: string;
 }
 
 /**
- * Status / assign / refresh controls shared by the thread header (desktop)
- * and the contact panel (mobile sheet).
+ * Status / assign / refresh / delete controls shared by the thread header
+ * (desktop) and the contact panel (mobile sheet).
  */
 export function ConversationThreadControls({
   conversationId,
@@ -61,14 +76,18 @@ export function ConversationThreadControls({
   onStatusChange,
   onAssignChange,
   onRefresh,
+  onDeleted,
   layout = "inline",
   className,
 }: ConversationThreadControlsProps) {
   const t = useTranslations("Inbox.messageThread");
   const { user } = useAuth();
+  const canDelete = useCan("send-messages");
   const { getPresence, getRow, now } = usePresence();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -137,6 +156,32 @@ export function ConversationThreadControls({
       refreshTimerRef.current = null;
     }, 700);
   }, [isRefreshing, onRefresh]);
+
+  const handleDeleteChat = useCallback(async () => {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(body?.error || t("toastChatDeleteFailed"));
+      }
+      setDeleteOpen(false);
+      toast.success(t("toastChatDeleted"));
+      onDeleted?.(conversationId);
+    } catch (err) {
+      console.error("Failed to delete conversation:", err);
+      toast.error(
+        err instanceof Error ? err.message : t("toastChatDeleteFailed"),
+      );
+    } finally {
+      setDeleting(false);
+    }
+  }, [conversationId, deleting, onDeleted, t]);
 
   const currentStatus = STATUS_OPTIONS.find((s) => s.value === status);
   const currentAssignee = profiles.find((p) => p.user_id === assignedAgentId);
@@ -257,6 +302,51 @@ export function ConversationThreadControls({
           )}
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <GatedButton
+        type="button"
+        variant="ghost"
+        size="sm"
+        canAct={canDelete}
+        gateReason="delete chats"
+        onClick={() => setDeleteOpen(true)}
+        title={t("deleteChat")}
+        className={cn(
+          "text-muted-foreground hover:bg-destructive/10 hover:text-destructive",
+          isRow ? "h-9 w-full justify-center gap-2 px-3 text-xs" : "h-7 w-7 px-0",
+        )}
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+        {isRow ? <span>{t("deleteChat")}</span> : null}
+      </GatedButton>
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent className="bg-popover border-border text-popover-foreground sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("deleteChatTitle")}</DialogTitle>
+            <DialogDescription>{t("deleteChatDescription")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={deleting}
+              onClick={() => setDeleteOpen(false)}
+            >
+              {t("deleteChatCancel")}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deleting}
+              onClick={() => void handleDeleteChat()}
+            >
+              {deleting && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              {t("deleteChatConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
