@@ -104,12 +104,12 @@ async function persistInboundWhatsAppMediaOnce(
   } = args
 
   const path = inboundMediaStoragePath(accountId, mediaId)
+  const {
+    data: { publicUrl: cachedUrl },
+  } = db.storage.from(CHAT_MEDIA_BUCKET).getPublicUrl(path)
 
-  // Cheap existence check via Storage API — no Meta call.
-  if (await storageObjectExists(db, path)) {
-    const {
-      data: { publicUrl: cachedUrl },
-    } = db.storage.from(CHAT_MEDIA_BUCKET).getPublicUrl(path)
+  // Cheap existence check — no Meta call.
+  if (cachedUrl && (await isPublicObjectPresent(cachedUrl))) {
     if (rewriteMessageUrls) {
       await rewriteProxyUrls(db, mediaId, cachedUrl)
     }
@@ -162,26 +162,25 @@ export async function getCachedInboundMediaUrl(
   mediaId: string,
 ): Promise<string | null> {
   const path = inboundMediaStoragePath(accountId, mediaId)
-  if (!(await storageObjectExists(db, path))) return null
   const {
     data: { publicUrl },
   } = db.storage.from(CHAT_MEDIA_BUCKET).getPublicUrl(path)
-  return publicUrl || null
+  if (!publicUrl) return null
+  if (await isPublicObjectPresent(publicUrl)) return publicUrl
+  return null
 }
 
-async function storageObjectExists(
-  db: SupabaseClient,
-  path: string,
-): Promise<boolean> {
-  const slash = path.lastIndexOf('/')
-  if (slash < 0) return false
-  const folder = path.slice(0, slash)
-  const name = path.slice(slash + 1)
-  const { data, error } = await db.storage
-    .from(CHAT_MEDIA_BUCKET)
-    .list(folder, { search: name, limit: 20 })
-  if (error) return false
-  return (data ?? []).some((f) => f.name === name)
+async function isPublicObjectPresent(publicUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(publicUrl, {
+      method: 'HEAD',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(8_000),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
 }
 
 async function rewriteProxyUrls(

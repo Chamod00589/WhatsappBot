@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import type { Message, MessageReaction } from "@/types";
 import {
@@ -62,16 +62,41 @@ function MediaUnavailable({ label, t }: { label: string, t: ReturnType<typeof us
 }
 
 function MediaImage({ url, alt }: { url: string; alt: string }) {
+  const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Public Supabase URLs load directly. Legacy `/api/whatsapp/media/...`
-  // paths 302 to Storage after a one-time persist (cookies on same-origin
-  // <img> are enough — no fetch→blob through the serverless function).
-  useEffect(() => {
-    setError(false);
-    setLoading(true);
+  const loadImage = useCallback(async () => {
+    if (!url) return;
+
+    // Proxy URLs need auth fetch to create blob URL
+    if (url.startsWith("/api/whatsapp/media/")) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("Failed to load media");
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        setSrc(blobUrl);
+      } catch {
+        setError(true);
+      } finally {
+        setLoading(false);
+      }
+    } else {
+      setSrc(url);
+      setLoading(false);
+    }
   }, [url]);
+
+  useEffect(() => {
+    loadImage();
+    return () => {
+      if (src?.startsWith("blob:")) {
+        URL.revokeObjectURL(src);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadImage]);
 
   if (error) {
     return (
@@ -81,24 +106,21 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
     );
   }
 
+  if (loading) {
+    return (
+      <div className="flex h-40 w-60 items-center justify-center rounded-lg bg-muted">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      </div>
+    );
+  }
+
   return (
-    <div className="relative max-h-64 max-w-60">
-      {loading && (
-        <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-muted">
-          <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-        </div>
-      )}
-      <img
-        src={url}
-        alt={alt}
-        className="max-h-64 max-w-60 rounded-lg object-cover"
-        onLoad={() => setLoading(false)}
-        onError={() => {
-          setLoading(false);
-          setError(true);
-        }}
-      />
-    </div>
+    <img
+      src={src ?? ""}
+      alt={alt}
+      className="max-h-64 max-w-60 rounded-lg object-cover"
+      onError={() => setError(true)}
+    />
   );
 }
 
