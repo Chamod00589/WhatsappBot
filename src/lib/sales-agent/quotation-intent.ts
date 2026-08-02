@@ -9,12 +9,15 @@ import {
   matchProductByIdentifyName,
 } from './match-products'
 import {
-  extractAllQtys,
+  assignQtysToImageLines,
   extractColorsFromText,
-  extractExplicitQty,
   extractOrderIntents,
+  mergeRequestedItems,
   resolveLineItems,
+  toOrderLineItems,
+  toPendingQuotedItems,
   type BagOrderIntent,
+  type OrderPendingQuotedItem,
 } from './order-intent'
 import type { MatchableQuickReply } from './match-products'
 import { IDENTIFY_CONFIDENCE_THRESHOLD } from './types'
@@ -51,49 +54,7 @@ export function isQuotationRequest(text: string): boolean {
   return priceCue
 }
 
-/**
- * Assign a qty to each image line from its caption, else zip global qty
- * mentions onto images in order, else 1.
- */
-export function assignQtysToImageLines(
-  imageCount: number,
-  captions: Array<string | null | undefined>,
-  inboundText: string,
-): number[] {
-  if (imageCount <= 0) return []
-
-  const fromCaptions = captions.map((c) => extractExplicitQty(c || ''))
-  const allHaveCaptionQty = fromCaptions.every((q) => q != null)
-  if (allHaveCaptionQty) {
-    return fromCaptions.map((q) => q as number)
-  }
-
-  const globalQtys = extractAllQtys(inboundText || '')
-  const out: number[] = []
-  let zipIdx = 0
-  for (let i = 0; i < imageCount; i++) {
-    if (fromCaptions[i] != null) {
-      out.push(fromCaptions[i] as number)
-      continue
-    }
-    if (zipIdx < globalQtys.length) {
-      out.push(globalQtys[zipIdx++])
-      continue
-    }
-    out.push(1)
-  }
-
-  // If no per-caption qty and exactly one global qty + one image → that qty
-  if (
-    imageCount === 1 &&
-    fromCaptions[0] == null &&
-    globalQtys.length >= 1
-  ) {
-    out[0] = globalQtys[0]
-  }
-
-  return out
-}
+export { assignQtysToImageLines } from './order-intent'
 
 /** @deprecated Prefer assignQtysToImageLines for multi-image bursts. */
 export function qtyPerLine(itemCount: number, extractedQty: number): number {
@@ -106,6 +67,8 @@ export function qtyPerLine(itemCount: number, extractedQty: number): number {
 
 /**
  * Resolve quotation line items from named bags in text and/or identified images.
+ * Falls back to conversation-saved requested items / recent customer texts so
+ * a later "price kohomada" quotes the bags already identified in this chat.
  */
 export async function resolveQuotationItems(args: {
   db: SupabaseClient
@@ -113,11 +76,16 @@ export async function resolveQuotationItems(args: {
   inboundText: string
   catalog: MatchableQuickReply[]
   images?: QuotationImageInput[]
+  /** Previously identified / quoted bags for this conversation. */
+  savedItems?: OrderPendingQuotedItem[]
+  /** Recent customer messages (newest first) for bag rematch. */
+  recentTexts?: string[]
   /** Min identify confidence to auto-include (default IDENTIFY_CONFIDENCE_THRESHOLD). */
   minConfidence?: number
 }): Promise<{
   items: OrderLineItem[]
   identified: Array<{ product: string; color: string; confidence: number }>
+  source: 'burst' | 'memory' | 'recent' | 'merged'
 }> {
   const {
     db,
@@ -125,6 +93,8 @@ export async function resolveQuotationItems(args: {
     inboundText,
     catalog,
     images = [],
+    savedItems = [],
+    recentTexts = [],
     minConfidence = IDENTIFY_CONFIDENCE_THRESHOLD,
   } = args
 
@@ -226,13 +196,43 @@ export async function resolveQuotationItems(args: {
     }
   }
 
-  const merged = [...namedItems, ...imageItems]
-  if (!merged.length) {
-    return { items: [], identified }
+  const burst = [...namedItems, ...imageItems]
+  if (burst.length) {
+    if (savedItems.length) {
+      const merged = mergeRequestedItems(
+        savedItems,
+        toPendingQuotedItems(burst),
+      )
+      return {
+        items: toOrderLineItems(merged),
+        identified,
+        source: 'merged',
+      }
+    }
+    return { items: burst, identified, source: 'burst' }
   }
 
-  // Keep per-line / per-image qty — do NOT overwrite with a single global qty
-  return { items: merged, identified }
+  if (savedItems.length) {
+    return {
+      items: toOrderLineItems(savedItems),
+      identified,
+      source: 'memory',
+    }
+  }
+
+  // Rematch bags named in recent chat when this turn is only "price kohomada"
+  const recentIntents = extractOrderIntents(
+    [inboundText, ...recentTexts].filter(Boolean),
+    catalog,
+  )
+  if (recentIntents.length) {
+    const recentItems = await resolveLineItemsWithImages(recentIntents)
+    if (recentItems.length) {
+      return { items: recentItems, identified, source: 'recent' }
+    }
+  }
+
+  return { items: [], identified, source: 'burst' }
 }
 
 async function resolveLineItemsWithImages(

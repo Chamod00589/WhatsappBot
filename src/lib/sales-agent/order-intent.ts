@@ -63,6 +63,33 @@ export const KNOWN_COLORS = [
   'rose gold',
 ] as const
 
+/**
+ * Singlish / casual aliases → canonical Latin color in KNOWN_COLORS.
+ * "rathu pata" / "sudu" etc. must resolve so quote/order/edit stay consistent.
+ */
+export const COLOR_ALIASES: Record<string, (typeof KNOWN_COLORS)[number]> = {
+  rathu: 'red',
+  rath: 'red',
+  ratu: 'red',
+  rathtu: 'red',
+  sudu: 'white',
+  sudhu: 'white',
+  kalu: 'black',
+  kaalu: 'black',
+  nil: 'blue',
+  neela: 'blue',
+  neel: 'blue',
+  kola: 'green',
+  pasel: 'green',
+  ros: 'pink',
+  gulabi: 'pink',
+  brownish: 'brown',
+  bej: 'beige',
+  beigeish: 'beige',
+  ashcolor: 'ash',
+  ashcolour: 'ash',
+}
+
 export interface BagOrderIntent {
   productId: string | null
   catalogMessageId: string | null
@@ -149,13 +176,30 @@ export function extractColorsFromText(text: string): string[] {
   const n = normalizeMatchText(text)
   if (!n) return []
   const found: string[] = []
-  // Longer phrases first
+
+  // Expand Singlish aliases into Latin color tokens for matching
+  let expanded = ` ${n} `
+  const aliasKeys = Object.keys(COLOR_ALIASES).sort((a, b) => b.length - a.length)
+  for (const alias of aliasKeys) {
+    const re = new RegExp(`(?:^|\\s)${escapeReg(alias)}(?:\\s|$)`, 'g')
+    expanded = expanded.replace(re, ` ${COLOR_ALIASES[alias]} `)
+  }
+  // "pata" / "patha" = "color" in Singlish — drop so "rathu pata" → red
+  expanded = expanded
+    .replace(/\b(pata|patha|paata)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
   const sorted = [...KNOWN_COLORS].sort((a, b) => b.length - a.length)
   for (const color of sorted) {
     const c = normalizeMatchText(color)
     if (!c) continue
     const re = new RegExp(`(?:^|\\s)${escapeReg(c)}(?:\\s+colou?r)?(?:\\s|$)`)
-    if (re.test(n) || n.includes(`${c} color`) || n.includes(`${c} colour`)) {
+    if (
+      re.test(expanded) ||
+      expanded.includes(`${c} color`) ||
+      expanded.includes(`${c} colour`)
+    ) {
       if (!found.some((f) => f.toLowerCase() === color)) {
         found.push(titleCaseColor(color))
       }
@@ -275,6 +319,49 @@ export function extractAllQtys(text: string): number[] {
  */
 export function extractQty(text: string): number {
   return extractExplicitQty(text) ?? 1
+}
+
+/**
+ * Assign a qty to each image line from its caption, else zip global qty
+ * mentions onto images in order, else 1.
+ */
+export function assignQtysToImageLines(
+  imageCount: number,
+  captions: Array<string | null | undefined>,
+  inboundText: string,
+): number[] {
+  if (imageCount <= 0) return []
+
+  const fromCaptions = captions.map((c) => extractExplicitQty(c || ''))
+  const allHaveCaptionQty = fromCaptions.every((q) => q != null)
+  if (allHaveCaptionQty) {
+    return fromCaptions.map((q) => q as number)
+  }
+
+  const globalQtys = extractAllQtys(inboundText || '')
+  const out: number[] = []
+  let zipIdx = 0
+  for (let i = 0; i < imageCount; i++) {
+    if (fromCaptions[i] != null) {
+      out.push(fromCaptions[i] as number)
+      continue
+    }
+    if (zipIdx < globalQtys.length) {
+      out.push(globalQtys[zipIdx++])
+      continue
+    }
+    out.push(1)
+  }
+
+  if (
+    imageCount === 1 &&
+    fromCaptions[0] == null &&
+    globalQtys.length >= 1
+  ) {
+    out[0] = globalQtys[0]
+  }
+
+  return out
 }
 
 /**
@@ -598,6 +685,176 @@ export function buildColorAskText(
 
 export function shouldRunOrderIntake(inboundText: string): boolean {
   return isAddressLikeMessage(inboundText)
+}
+
+/** Stable key so the same bag upserts instead of duplicating in memory. */
+export function requestedItemKey(item: {
+  productId?: string | null
+  name: string
+}): string {
+  if (item.productId) return `id:${item.productId}`
+  return `name:${normalizeMatchText(item.name)}`
+}
+
+/**
+ * Merge conversation-scoped requested bags. Incoming lines upsert by
+ * product id / name; empty color on incoming keeps the previous color;
+ * qty/price/image prefer newer non-empty values.
+ */
+export function mergeRequestedItems(
+  existing: OrderPendingQuotedItem[],
+  incoming: OrderPendingQuotedItem[],
+): OrderPendingQuotedItem[] {
+  const map = new Map<string, OrderPendingQuotedItem>()
+  for (const it of existing) {
+    if (!it?.name) continue
+    map.set(requestedItemKey(it), { ...it, qty: Math.max(1, it.qty || 1) })
+  }
+  for (const it of incoming) {
+    if (!it?.name) continue
+    const key = requestedItemKey(it)
+    const prev = map.get(key)
+    if (!prev) {
+      map.set(key, {
+        productId: it.productId,
+        name: it.name,
+        color: it.color || '',
+        qty: Math.max(1, it.qty || 1),
+        price: Number(it.price) || 0,
+        image: it.image,
+      })
+      continue
+    }
+    map.set(key, {
+      productId: it.productId || prev.productId,
+      name: it.name || prev.name,
+      color: it.color?.trim() ? it.color : prev.color,
+      qty: it.qty >= 1 ? it.qty : prev.qty,
+      price: Number(it.price) > 0 ? Number(it.price) : prev.price,
+      image: it.image || prev.image,
+    })
+  }
+  return Array.from(map.values())
+}
+
+export function quotedItemsFromPending(
+  pending: OrderPendingState | null,
+): OrderPendingQuotedItem[] {
+  if (pending?.type === 'awaiting_address') return pending.items
+  return []
+}
+
+export function toOrderLineItems(
+  items: OrderPendingQuotedItem[],
+): OrderLineItem[] {
+  return items.map((it) => ({
+    productId: it.productId,
+    name: it.name,
+    color: it.color || '',
+    qty: Math.max(1, it.qty || 1),
+    price: Number(it.price) || 0,
+    image: it.image,
+  }))
+}
+
+export function toPendingQuotedItems(
+  items: OrderLineItem[],
+): OrderPendingQuotedItem[] {
+  return items.map((it) => ({
+    productId: it.productId,
+    name: it.name,
+    color: it.color || '',
+    qty: Math.max(1, it.qty || 1),
+    price: Number(it.price) || 0,
+    image: it.image,
+  }))
+}
+
+/**
+ * Load + merge + save awaiting_address items (conversation bag memory).
+ * Does not clobber an awaiting_color latch that still holds an address.
+ */
+export async function upsertAwaitingAddressItems(
+  db: SupabaseClient,
+  conversationId: string,
+  incoming: OrderPendingQuotedItem[],
+): Promise<OrderPendingQuotedItem[]> {
+  if (!incoming.length) return []
+
+  const { data } = await db
+    .from('conversations')
+    .select('sa_order_pending')
+    .eq('id', conversationId)
+    .maybeSingle()
+
+  const prev = parseOrderPending(data?.sa_order_pending)
+  if (prev?.type === 'awaiting_color') {
+    // Keep address latch; only refresh bag list for the color ask.
+    const bags: OrderPendingBag[] = mergeRequestedItems(
+      prev.bags.map((b) => ({
+        productId: b.productId || undefined,
+        name: b.name,
+        color: '',
+        qty: b.qty,
+        price: 0,
+      })),
+      incoming,
+    ).map((it) => ({
+      productId: it.productId ?? null,
+      catalogMessageId: null,
+      name: it.name,
+      qty: it.qty,
+      quickReplyId: '',
+    }))
+    await db
+      .from('conversations')
+      .update({
+        sa_order_pending: {
+          type: 'awaiting_color',
+          bags,
+          addressText: prev.addressText,
+          askedAt: new Date().toISOString(),
+        } satisfies OrderPendingState,
+      })
+      .eq('id', conversationId)
+    return incoming
+  }
+
+  const existing = quotedItemsFromPending(prev)
+  const merged = mergeRequestedItems(existing, incoming)
+  await db
+    .from('conversations')
+    .update({
+      sa_order_pending: {
+        type: 'awaiting_address',
+        items: merged,
+        askedAt: new Date().toISOString(),
+      } satisfies OrderPendingState,
+    })
+    .eq('id', conversationId)
+  return merged
+}
+
+/**
+ * Patch color on saved requested items. If `targetName` matches one bag,
+ * only that line changes; otherwise all lines update (common Singlish
+ * "mata rathu pata bag eka denna" after a single bag was identified).
+ */
+export function patchRequestedItemsColor(
+  items: OrderPendingQuotedItem[],
+  newColor: string,
+  targetName?: string | null,
+): OrderPendingQuotedItem[] {
+  const color = newColor.trim()
+  if (!color || !items.length) return items
+  const target = targetName ? normalizeMatchText(targetName) : ''
+  return items.map((it) => {
+    if (target) {
+      const n = normalizeMatchText(it.name)
+      if (!n.includes(target) && !target.includes(n)) return it
+    }
+    return { ...it, color }
+  })
 }
 
 function titleCaseColor(color: string): string {

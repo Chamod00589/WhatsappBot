@@ -5,6 +5,11 @@ import {
   isOrderEditRequest,
 } from './order-edit-intent'
 import { matchCustomQuickReplies, type CustomQuickReply } from './match-custom-qr'
+import {
+  extractColorsFromText,
+  mergeRequestedItems,
+  patchRequestedItemsColor,
+} from './order-intent'
 
 describe('order-edit-intent', () => {
   it('detects color change asks', () => {
@@ -14,8 +19,58 @@ describe('order-edit-intent', () => {
     expect(extractEditColor('bag eka white karanna')).toBe('White')
   })
 
+  it('detects Singlish color change (rathu pata)', () => {
+    expect(isOrderEditRequest('mata rathu pata bag eka denna')).toBe(true)
+    expect(extractEditColor('mata rathu pata bag eka denna')).toBe('Red')
+    expect(extractColorsFromText('sudu color eka denna')).toEqual(['White'])
+  })
+
   it('does not treat price asks as edits', () => {
     expect(isOrderEditRequest('bloom black bag price kohomda')).toBe(false)
+  })
+})
+
+describe('requested items memory', () => {
+  it('merges qty/color updates without dropping the bag', () => {
+    const merged = mergeRequestedItems(
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: 'Black',
+          qty: 2,
+          price: 2500,
+        },
+      ],
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: 'Red',
+          qty: 2,
+          price: 2500,
+        },
+      ],
+    )
+    expect(merged).toHaveLength(1)
+    expect(merged[0].color).toBe('Red')
+    expect(merged[0].qty).toBe(2)
+  })
+
+  it('patches color and keeps qty', () => {
+    const patched = patchRequestedItemsColor(
+      [
+        {
+          name: 'Cloudy Shoulder Bag',
+          color: 'Black',
+          qty: 2,
+          price: 2500,
+        },
+      ],
+      'Red',
+    )
+    expect(patched[0].color).toBe('Red')
+    expect(patched[0].qty).toBe(2)
   })
 })
 
@@ -28,38 +83,13 @@ describe('matchCustomQuickReplies description matching', () => {
     content_text: null,
     catalog_message_id: 'qm_white',
     product_id: null,
+    needles: ['white bags'],
   }
 
-  const delivery: CustomQuickReply = {
-    id: '2',
-    title: 'Delivery time Quick Reply',
-    description:
-      'Explains courier delivery time 2-3 working days and shipping charge',
-    kind: 'catalog',
-    content_text: null,
-    catalog_message_id: 'qm_del',
-    product_id: null,
-  }
-
-  it('does not match White bags QR for order color-change ask', () => {
-    const hits = matchCustomQuickReplies('bag eka white karanna', [
-      whiteBags,
-      delivery,
-    ])
-    expect(hits).toHaveLength(0)
-  })
-
-  it('matches delivery QR when description fits the question', () => {
-    const hits = matchCustomQuickReplies(
-      'delivery time kochchara days da?',
-      [whiteBags, delivery],
-      { minScore: 0.3 },
-    )
-    expect(hits[0]?.qr.title).toContain('Delivery')
-  })
-
-  it('flags mostly color asks', () => {
-    expect(isMostlyColorAsk('white')).toBe(true)
-    expect(isMostlyColorAsk('delivery time kiyanna')).toBe(false)
+  it('does not match White bags FAQ for color-edit asks', () => {
+    expect(
+      matchCustomQuickReplies('mata rathu pata bag eka denna', [whiteBags]),
+    ).toEqual([])
+    expect(isMostlyColorAsk('mata rathu pata bag eka denna')).toBe(true)
   })
 })

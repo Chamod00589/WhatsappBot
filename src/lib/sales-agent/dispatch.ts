@@ -47,6 +47,7 @@ import {
 } from './actions/orders'
 import {
   actionEditOrderColor,
+  actionPatchPendingItemsColor,
   extractEditColor,
   isOrderEditRequest,
 } from './order-edit-intent'
@@ -64,9 +65,12 @@ import {
   parseColorOnlyReply,
   parseOrderPending,
   productDisplayName,
+  quotedItemsFromPending,
   resolveLineItems,
   resolveOrderIntentsForAddress,
   shouldRunOrderIntake,
+  toPendingQuotedItems,
+  upsertAwaitingAddressItems,
   type OrderPendingState,
 } from './order-intent'
 import {
@@ -316,24 +320,29 @@ export async function dispatchSalesAgentNow(
       20,
     )
 
-    // 2c) Price / quotation request (bag names and/or images) → QuotationCard PNG
+    // 2c) Price / quotation request — use burst bags, else saved chat bags
     if (config.quotation && isQuotationRequest(inboundText)) {
       log.step('quotation', 'Price/quotation intent detected', {
         images: inboundImages.length,
       })
-      const { items, identified } = await resolveQuotationItems({
+      const savedForQuote = quotedItemsFromPending(
+        parseOrderPending(gate.conversation.sa_order_pending),
+      )
+      const { items, identified, source } = await resolveQuotationItems({
         db,
         accountId,
         inboundText,
         catalog: products,
         images: inboundImages,
+        savedItems: savedForQuote,
+        recentTexts: recentCustomerTexts,
       })
       log.step(
         'quotation',
         items.length
-          ? `Resolved ${items.length} line item(s) for quotation`
+          ? `Resolved ${items.length} line item(s) for quotation (${source})`
           : 'No resolvable bags for quotation',
-        { items, identified },
+        { items, identified, source, savedCount: savedForQuote.length },
       )
       if (items.length > 0) {
         const r = await actionSendQuotation({
@@ -740,6 +749,49 @@ export async function dispatchSalesAgentNow(
       return
     }
 
+    // 3a) Color change on saved requested bags (pre-order) — e.g. "mata rathu pata bag eka denna"
+    if (
+      inboundText &&
+      isOrderEditRequest(inboundText) &&
+      !isAddressLikeMessage(inboundText)
+    ) {
+      const newColor = extractEditColor(inboundText)
+      const pendingBags = quotedItemsFromPending(
+        parseOrderPending(gate.conversation.sa_order_pending),
+      )
+      if (newColor && pendingBags.length) {
+        log.step('edit_pending', 'Patching saved bag color before order', {
+          newColor,
+          items: pendingBags.length,
+        })
+        const r = await actionPatchPendingItemsColor({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          configOwnerUserId,
+          newColor,
+          inboundText,
+          catalog: products,
+          useSinglish,
+        })
+        log.step(
+          'edit_pending',
+          r.ok ? r.message : `Pending edit failed: ${r.message}`,
+        )
+        if (r.ok) {
+          await rememberAnsweredQuestion(db, conversationId, inboundText)
+          await claimSlot(
+            db,
+            conversationId,
+            config.autoReplyMaxPerConversation,
+          )
+          await log.complete()
+          return
+        }
+      }
+    }
+
     // 3b) After an order exists — color/bag change → edit order (not FAQ / White bags QR)
     if (
       config.editOrder &&
@@ -749,8 +801,10 @@ export async function dispatchSalesAgentNow(
       !isAddressLikeMessage(inboundText)
     ) {
       const newColor = extractEditColor(inboundText)
+      const named = extractOrderIntents([inboundText], products)
       log.step('edit_order', 'Order edit intent detected', {
         newColor,
+        target: named[0]?.name || null,
         text: inboundText.slice(0, 120),
       })
       if (newColor) {
@@ -763,6 +817,7 @@ export async function dispatchSalesAgentNow(
           contactPhone,
           newColor,
           useSinglish,
+          targetName: named[0]?.name || null,
         })
         log.step(
           'edit_order',
@@ -797,6 +852,7 @@ export async function dispatchSalesAgentNow(
         contactId,
         configOwnerUserId,
         images: inboundImages,
+        burstText: inboundText,
         useSinglish,
       })
       log.set({
@@ -903,53 +959,23 @@ export async function dispatchSalesAgentNow(
           }
         }
 
-        // Remember bag(+color) so a follow-up address creates the order
-        // without asking "which bag" again.
+        // Remember bag(+color+qty) — merge into chat memory (don't replace prior bags)
         if (config.createOrder && intents.length) {
           try {
             const items = await resolveLineItems(intents)
-            if (items.length && items.every((i) => i.color)) {
-              await db
-                .from('conversations')
-                .update({
-                  sa_order_pending: {
-                    type: 'awaiting_address',
-                    items: items.map((it) => ({
-                      productId: it.productId,
-                      name: it.name,
-                      color: it.color || '',
-                      qty: it.qty,
-                      price: it.price,
-                      image: it.image,
-                    })),
-                    askedAt: new Date().toISOString(),
-                  } satisfies OrderPendingState,
-                })
-                .eq('id', conversationId)
+            if (items.length) {
+              await upsertAwaitingAddressItems(
+                db,
+                conversationId,
+                toPendingQuotedItems(items),
+              )
               log.step(
                 'order',
-                'Saved bag+color from product ask — waiting for address',
+                items.every((i) => i.color)
+                  ? 'Merged bag+color from product ask into chat memory'
+                  : 'Merged bag from product ask (color may be empty)',
                 { items },
               )
-            } else if (items.length) {
-              // Bag named but color missing — still remember bags for address path
-              await db
-                .from('conversations')
-                .update({
-                  sa_order_pending: {
-                    type: 'awaiting_address',
-                    items: items.map((it) => ({
-                      productId: it.productId,
-                      name: it.name,
-                      color: it.color || '',
-                      qty: it.qty,
-                      price: it.price,
-                      image: it.image,
-                    })),
-                    askedAt: new Date().toISOString(),
-                  } satisfies OrderPendingState,
-                })
-                .eq('id', conversationId)
             }
           } catch (err) {
             console.warn('[sales-agent] save awaiting_address failed:', err)
@@ -962,23 +988,11 @@ export async function dispatchSalesAgentNow(
           try {
             const items = await resolveLineItems(withColor)
             if (items.length) {
-              await db
-                .from('conversations')
-                .update({
-                  sa_order_pending: {
-                    type: 'awaiting_address',
-                    items: items.map((it) => ({
-                      productId: it.productId,
-                      name: it.name,
-                      color: it.color || '',
-                      qty: it.qty,
-                      price: it.price,
-                      image: it.image,
-                    })),
-                    askedAt: new Date().toISOString(),
-                  } satisfies OrderPendingState,
-                })
-                .eq('id', conversationId)
+              await upsertAwaitingAddressItems(
+                db,
+                conversationId,
+                toPendingQuotedItems(items),
+              )
             }
           } catch {
             /* ignore */
