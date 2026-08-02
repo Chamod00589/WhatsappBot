@@ -141,9 +141,9 @@ export function SalesAgentDebugPanel({
             <p className="text-destructive">{error}</p>
           ) : runs.length === 0 && !loading ? (
             <p className="text-muted-foreground">
-              No Sales Agent runs yet for this chat. Send a test message (or{' '}
-              <code className="rounded bg-muted px-1">***</code> then a
-              message) to see steps here.
+              No Sales Agent runs yet for this chat. Send{' '}
+              <code className="rounded bg-muted px-1">***</code> to reset
+              session memory, then a new message to test.
             </p>
           ) : (
             <ul className="space-y-2">

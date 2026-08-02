@@ -73,11 +73,36 @@ export async function findTestMarkerCutoff(
   return null
 }
 
+/** True when the inbound text includes the *** session-reset marker. */
+export function inboundHasTestMarker(text: string): boolean {
+  return typeof text === 'string' && text.includes(TEST_MARKER)
+}
+
 /**
  * Strip the *** marker itself from inbound text for matching / AI.
  */
 export function stripTestMarker(text: string): string {
   return text.replace(/\*{3,}/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Clear conversation-scoped Sales Agent memory so the chat is treated as
+ * a fresh session from the *** marker onward (bags, identify, dedupe, reply cap).
+ */
+export async function resetSalesAgentSession(
+  db: SupabaseClient,
+  conversationId: string,
+): Promise<void> {
+  await db
+    .from('conversations')
+    .update({
+      sa_order_pending: null,
+      sa_identify_pending: null,
+      sa_last_question_fp: null,
+      sa_last_answered_at: null,
+      ai_reply_count: 0,
+    })
+    .eq('id', conversationId)
 }
 
 export function parseSalesCapabilities(row: Record<string, unknown>): {

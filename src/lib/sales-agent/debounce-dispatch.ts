@@ -1,6 +1,7 @@
 import { supabaseAdmin } from '@/lib/ai/admin-client'
 import type { SalesAgentDispatchArgs } from './types'
 import { dispatchSalesAgentNow } from './dispatch'
+import { findTestMarkerCutoff } from './gates'
 
 /** Quiet period after the last inbound before one Sales Agent pass.
  *  Each new message resets this timer (wait again 10s). */
@@ -145,6 +146,9 @@ async function mergeBurstArgs(
     .limit(1)
     .maybeSingle()
 
+  // *** resets the session — never pull customer texts from before it.
+  const markerCutoff = await findTestMarkerCutoff(db, conversationId)
+
   let query = db
     .from('messages')
     .select('content_text, content_type, media_url, created_at')
@@ -153,8 +157,19 @@ async function mergeBurstArgs(
     .order('created_at', { ascending: true })
     .limit(20)
 
-  if (lastBot?.created_at) {
-    query = query.gt('created_at', lastBot.created_at)
+  const sinceCandidates = [
+    lastBot?.created_at as string | undefined,
+    markerCutoff || undefined,
+  ].filter((v): v is string => Boolean(v))
+  if (sinceCandidates.length) {
+    // Use the later cutoff so *** wins over an older bot reply.
+    const since = sinceCandidates.sort()[sinceCandidates.length - 1]
+    // Include the *** message itself (gte) so "*** bag ask" stays in the burst.
+    if (markerCutoff && since === markerCutoff) {
+      query = query.gte('created_at', since)
+    } else {
+      query = query.gt('created_at', since)
+    }
   } else {
     // New thread — only coalesce the last few minutes, not the whole history.
     query = query.gte(

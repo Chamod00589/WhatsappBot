@@ -8,6 +8,8 @@ import type { AiConfigWithSales, SalesAgentDispatchArgs } from './types'
 import {
   parseSalesCapabilities,
   evaluateSalesAgentGates,
+  inboundHasTestMarker,
+  resetSalesAgentSession,
   stripTestMarker,
 } from './gates'
 import { buildSalesAgentContext } from './context'
@@ -234,6 +236,25 @@ export async function dispatchSalesAgentNow(
     }
 
     const inboundText = stripTestMarker(rawInbound || '')
+
+    // *** = start a fresh sales session for this contact chat
+    if (inboundHasTestMarker(rawInbound || '')) {
+      await resetSalesAgentSession(db, conversationId)
+      gate.conversation.sa_order_pending = null
+      gate.conversation.sa_identify_pending = null
+      gate.conversation.sa_last_question_fp = null
+      gate.conversation.ai_reply_count = 0
+      log.step(
+        'reset',
+        '*** marker — cleared bag memory / pending / reply cap; treating as new chat',
+      )
+      // Bare "***" (nothing else to process) — stop here
+      if (!inboundText && inboundImages.length === 0) {
+        await log.complete()
+        return
+      }
+    }
+
     const { messages, customerTexts } = await buildSalesAgentContext(
       db,
       conversationId,

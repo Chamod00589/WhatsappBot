@@ -12,6 +12,7 @@ import {
   type MatchableQuickReply,
 } from './match-products'
 import { isAddressLikeMessage } from './actions/orders'
+import { findTestMarkerCutoff, stripTestMarker } from './gates'
 
 const TITLE_NOISE =
   /\b(details?\s+)?quick\s*reply\b|\bdetails\b/gi
@@ -515,13 +516,17 @@ export async function loadAlreadySentProductKeys(
   conversationId: string,
   catalog: MatchableQuickReply[],
 ): Promise<Set<string>> {
-  const { data } = await db
+  const cutoff = await findTestMarkerCutoff(db, conversationId)
+  let query = db
     .from('messages')
-    .select('content_text, ai_context_summary')
+    .select('content_text, ai_context_summary, created_at')
     .eq('conversation_id', conversationId)
     .in('sender_type', ['agent', 'bot'])
     .order('created_at', { ascending: false })
     .limit(100)
+  if (cutoff) query = query.gte('created_at', cutoff)
+
+  const { data } = await query
 
   const blob = ((data ?? []) as Array<{
     content_text: string | null
@@ -554,16 +559,20 @@ export async function loadRecentCustomerTexts(
   conversationId: string,
   limit = 12,
 ): Promise<string[]> {
-  const { data } = await db
+  const cutoff = await findTestMarkerCutoff(db, conversationId)
+  let query = db
     .from('messages')
-    .select('content_text')
+    .select('content_text, created_at')
     .eq('conversation_id', conversationId)
     .eq('sender_type', 'customer')
     .order('created_at', { ascending: false })
     .limit(limit)
+  if (cutoff) query = query.gte('created_at', cutoff)
+
+  const { data } = await query
 
   return ((data ?? []) as Array<{ content_text: string | null }>)
-    .map((m) => (m.content_text || '').trim())
+    .map((m) => stripTestMarker((m.content_text || '').trim()))
     .filter(Boolean)
 }
 
@@ -579,13 +588,17 @@ export async function loadRecentlyOfferedProducts(
   catalog: MatchableQuickReply[],
   limit = 40,
 ): Promise<MatchableQuickReply[]> {
-  const { data } = await db
+  const cutoff = await findTestMarkerCutoff(db, conversationId)
+  let query = db
     .from('messages')
-    .select('content_text, ai_context_summary')
+    .select('content_text, ai_context_summary, created_at')
     .eq('conversation_id', conversationId)
     .in('sender_type', ['agent', 'bot'])
     .order('created_at', { ascending: false })
     .limit(limit)
+  if (cutoff) query = query.gte('created_at', cutoff)
+
+  const { data } = await query
 
   const rows = (data ?? []) as Array<{
     content_text: string | null

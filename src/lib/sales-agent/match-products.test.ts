@@ -59,4 +59,11 @@ describe('stripTestMarker', () => {
   it('removes *** from inbound', () => {
     expect(stripTestMarker('*** bunny bag')).toBe('bunny bag')
   })
+
+  it('detects *** reset marker', async () => {
+    const { inboundHasTestMarker } = await import('./gates')
+    expect(inboundHasTestMarker('***')).toBe(true)
+    expect(inboundHasTestMarker('*** cloudy bag')).toBe(true)
+    expect(inboundHasTestMarker('cloudy bag')).toBe(false)
+  })
 })
