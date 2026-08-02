@@ -1,7 +1,10 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
-import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
+import {
+  persistInboundWhatsAppMedia,
+  proxyMediaUrl,
+} from '@/lib/whatsapp/persist-inbound-media'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
@@ -611,9 +614,11 @@ async function processMessage(
     return
   }
 
-  // Parse message content based on type
+  // Parse message content based on type. Inbound media is persisted to
+  // Supabase Storage here (inside after()) so the inbox serves a public
+  // CDN URL and never re-proxies Meta through Vercel on every view.
   const { contentText, mediaUrl, mediaType, interactiveReplyId } =
-    await parseMessageContent(message, accessToken)
+    await parseMessageContent(message, accessToken, accountId)
 
   // Resolve swipe-reply context if present. A missing parent is fine —
   // we just store NULL and the UI renders the message without a quote.
@@ -840,7 +845,8 @@ async function processMessage(
 
 async function parseMessageContent(
   message: WhatsAppMessage,
-  accessToken: string
+  accessToken: string,
+  accountId: string,
 ): Promise<{
   contentText: string | null
   mediaUrl: string | null
@@ -854,22 +860,31 @@ async function parseMessageContent(
    */
   interactiveReplyId: string | null
 }> {
-  // getMediaUrl signature is (mediaId, accessToken) — earlier code had
-  // the args swapped, so every verification hit an invalid Meta URL and
-  // fell through to the catch block, leaving mediaUrl as null. That's
-  // why images showed up as empty bubbles in the inbox.
-  const verifyAndBuildUrl = async (
-    mediaId: string
+  /**
+   * Download Meta media once into `chat-media` and return the public URL.
+   * On failure, fall back to the legacy proxy path so the message still
+   * inserts (lazy persist on first inbox open).
+   */
+  const persistOrProxyUrl = async (
+    mediaId: string,
+    mimeType?: string | null,
   ): Promise<string | null> => {
     try {
-      await getMediaUrl({ mediaId, accessToken })
-      return `/api/whatsapp/media/${mediaId}`
+      return await persistInboundWhatsAppMedia({
+        db: supabaseAdmin(),
+        accountId,
+        mediaId,
+        accessToken,
+        mimeType,
+        // Message row does not exist yet — insert uses the returned URL.
+        rewriteMessageUrls: false,
+      })
     } catch (error) {
       console.error(
-        `Failed to verify media ${mediaId} with Meta:`,
-        error instanceof Error ? error.message : error
+        `Failed to persist inbound media ${mediaId}; using proxy fallback:`,
+        error instanceof Error ? error.message : error,
       )
-      return null
+      return proxyMediaUrl(mediaId)
     }
   }
 
@@ -891,7 +906,10 @@ async function parseMessageContent(
         return {
           ...empty,
           contentText: message.image.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.image.id),
+          mediaUrl: await persistOrProxyUrl(
+            message.image.id,
+            message.image.mime_type,
+          ),
           mediaType: message.image.mime_type,
         }
       }
@@ -902,7 +920,10 @@ async function parseMessageContent(
         return {
           ...empty,
           contentText: message.video.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.video.id),
+          mediaUrl: await persistOrProxyUrl(
+            message.video.id,
+            message.video.mime_type,
+          ),
           mediaType: message.video.mime_type,
         }
       }
@@ -914,7 +935,10 @@ async function parseMessageContent(
           ...empty,
           contentText:
             message.document.caption || message.document.filename || null,
-          mediaUrl: await verifyAndBuildUrl(message.document.id),
+          mediaUrl: await persistOrProxyUrl(
+            message.document.id,
+            message.document.mime_type,
+          ),
           mediaType: message.document.mime_type,
         }
       }
@@ -924,7 +948,10 @@ async function parseMessageContent(
       if (message.audio?.id) {
         return {
           ...empty,
-          mediaUrl: await verifyAndBuildUrl(message.audio.id),
+          mediaUrl: await persistOrProxyUrl(
+            message.audio.id,
+            message.audio.mime_type,
+          ),
           mediaType: message.audio.mime_type,
         }
       }
@@ -937,7 +964,10 @@ async function parseMessageContent(
       if (message.sticker?.id) {
         return {
           ...empty,
-          mediaUrl: await verifyAndBuildUrl(message.sticker.id),
+          mediaUrl: await persistOrProxyUrl(
+            message.sticker.id,
+            message.sticker.mime_type,
+          ),
           mediaType: message.sticker.mime_type,
         }
       }

@@ -32,7 +32,7 @@ function SignupPageInner() {
   // invite token in the query so it survives the signup → email
   // verification → redirect round-trip. `emailRedirectTo` below
   // points back at /join/<token> so the user lands on the redeem
-  // step after verifying instead of being dropped on /dashboard.
+  // step after verifying instead of being dropped on /inbox.
   const inviteToken = searchParams.get("invite");
 
   const [fullName, setFullName] = useState("");

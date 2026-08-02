@@ -62,7 +62,7 @@ function LoginPageInner() {
 
     // Full-page navigation (not router.push) so the browser issues a
     // fresh top-level request that carries the just-written Supabase
-    // auth cookies to the middleware gating /dashboard. A soft
+    // auth cookies to the middleware gating /inbox. A soft
     // client-side navigation can reach the protected route before the
     // server observes the new session, so the middleware bounces it
     // back to /login — which looks like the page "just refreshing"
@@ -70,7 +70,7 @@ function LoginPageInner() {
     // reload the invite-accept flow already uses in join/[token].
     const destination = inviteToken
       ? `/join/${encodeURIComponent(inviteToken)}`
-      : "/dashboard";
+      : "/inbox";
     window.location.href = destination;
   };
 

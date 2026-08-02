@@ -17,6 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ModeToggle } from "@/components/layout/mode-toggle";
+import { FullscreenToggle } from "@/components/layout/fullscreen-toggle";
 
 const pageTitles: Record<string, string> = {
   "/dashboard": "dashboard",
@@ -35,7 +36,7 @@ function getPageTitleKey(pathname: string): string {
   const match = Object.entries(pageTitles)
     .filter(([path]) => pathname.startsWith(`${path}/`) || pathname === path)
     .sort((a, b) => b[0].length - a[0].length)[0];
-  return match ? match[1] : "dashboard";
+  return match ? match[1] : "inbox";
 }
 
 interface HeaderProps {
@@ -75,6 +76,7 @@ export function Header({ onOpenSidebar }: HeaderProps) {
       </div>
 
       <div className="flex items-center gap-1 sm:gap-2">
+        <FullscreenToggle />
         <ModeToggle />
 
         <DropdownMenu>

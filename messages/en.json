@@ -62,6 +62,10 @@
   "ModeToggle": {
     "switchMode": "Switch to {mode} mode"
   },
+  "FullscreenToggle": {
+    "enter": "Enter fullscreen",
+    "exit": "Exit fullscreen"
+  },
   "Dashboard": {
     "page": {
       "title": "Dashboard",
@@ -181,7 +185,9 @@
       "templates": "Templates",
       "readOnlyPlaceholder": "Read-only — viewers can browse but not reply",
       "sessionExpiredPlaceholder": "Session expired - use a template",
-      "typeMessagePlaceholder": "Message..",
+      "typeMessagePlaceholder": "",
+      "composeTitle": "Type message",
+      "expandComposer": "Open message box",
       "readOnlyTitle": "Read-only — your role can't send messages",
       "recording": "Recording… {current} / {max}",
       "cancel": "Cancel",

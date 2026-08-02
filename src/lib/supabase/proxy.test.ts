@@ -68,7 +68,7 @@ describe("proxy — refreshed auth cookies survive redirects", () => {
     const res = await updateSession(new NextRequest("https://app.test/login"));
 
     expect(res.status).toBe(307);
-    expect(res.headers.get("location")).toContain("/dashboard");
+    expect(res.headers.get("location")).toContain("/inbox");
     expect(res.cookies.get(ROTATED.name)?.value).toBe(ROTATED.value);
   });
 

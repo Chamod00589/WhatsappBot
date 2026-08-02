@@ -91,7 +91,7 @@ export async function updateSession(request: NextRequest) {
       url.pathname = `/join/${encodeURIComponent(inviteToken)}`
       url.search = ''
     } else {
-      url.pathname = '/dashboard'
+      url.pathname = '/inbox'
       url.search = ''
     }
     return withRefreshedCookies(NextResponse.redirect(url))

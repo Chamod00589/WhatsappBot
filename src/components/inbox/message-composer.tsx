@@ -160,7 +160,10 @@ export function MessageComposer({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [drafting, setDrafting] = useState(false);
+  /** Mobile: large compose popup so typed text is readable. */
+  const [composeSheetOpen, setComposeSheetOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const sheetTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Interactive-message builder dialog + quick-reply picker.
   const [interactiveOpen, setInteractiveOpen] = useState(false);
@@ -234,6 +237,30 @@ export function MessageComposer({
     el.style.height = `${Math.min(el.scrollHeight, 96)}px`;
   }, []);
 
+  /** Keep the mobile sheet textarea about 3–4 visible rows (not full-screen). */
+  const adjustSheetHeight = useCallback(() => {
+    const el = sheetTextareaRef.current;
+    if (!el) return;
+    const minPx = 88 // ~3 rows
+    const maxPx = 120 // ~4 rows
+    el.style.height = "auto";
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, minPx), maxPx)}px`;
+  }, []);
+
+  useEffect(() => {
+    if (!composeSheetOpen) return;
+    const id = window.requestAnimationFrame(() => {
+      adjustSheetHeight();
+      const el = sheetTextareaRef.current;
+      if (el) {
+        el.focus();
+        const len = el.value.length;
+        el.setSelectionRange(len, len);
+      }
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [composeSheetOpen, adjustSheetHeight]);
+
   const handleSend = useCallback(async () => {
     const trimmed = text.trim();
     if (!trimmed || sending || sessionExpired) return;
@@ -242,6 +269,7 @@ export function MessageComposer({
     try {
       onSend(trimmed, replyTo?.id);
       setText("");
+      setComposeSheetOpen(false);
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
@@ -267,6 +295,19 @@ export function MessageComposer({
     },
     [adjustHeight]
   );
+
+  const handleSheetChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      setText(e.target.value);
+      adjustSheetHeight();
+    },
+    [adjustSheetHeight]
+  );
+
+  const openComposeSheet = useCallback(() => {
+    if (sessionExpired || readOnly) return;
+    setComposeSheetOpen(true);
+  }, [sessionExpired, readOnly]);
 
   // Ask the AI assistant for a suggested reply and drop it into the
   // composer for the agent to edit + send. Read-only server-side —
@@ -295,16 +336,22 @@ export function MessageComposer({
         return;
       }
       setText(draftText);
-      // Let the textarea grow to fit and drop the cursor at the end so
-      // the agent can tweak immediately.
-      requestAnimationFrame(() => {
-        adjustHeight();
-        const el = textareaRef.current;
-        if (el) {
-          el.focus();
-          el.setSelectionRange(el.value.length, el.value.length);
-        }
-      });
+      // Mobile: open the large compose sheet so the draft is readable.
+      const mobile =
+        typeof window !== "undefined" &&
+        window.matchMedia("(max-width: 767px)").matches;
+      if (mobile) {
+        setComposeSheetOpen(true);
+      } else {
+        requestAnimationFrame(() => {
+          adjustHeight();
+          const el = textareaRef.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(el.value.length, el.value.length);
+          }
+        });
+      }
     } catch {
       toast.error("Couldn't reach the AI assistant.");
     } finally {
@@ -388,14 +435,21 @@ export function MessageComposer({
       setText((prev) =>
         prev && !/\s$/.test(prev) ? `${prev}\n${body}` : `${prev}${body}`,
       );
-      requestAnimationFrame(() => {
-        adjustHeight();
-        const el = textareaRef.current;
-        if (el) {
-          el.focus();
-          el.setSelectionRange(el.value.length, el.value.length);
-        }
-      });
+      const mobile =
+        typeof window !== "undefined" &&
+        window.matchMedia("(max-width: 767px)").matches;
+      if (mobile) {
+        setComposeSheetOpen(true);
+      } else {
+        requestAnimationFrame(() => {
+          adjustHeight();
+          const el = textareaRef.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(el.value.length, el.value.length);
+          }
+        });
+      }
     },
     [openInteractiveBuilder, adjustHeight, onSendProductQuickReply],
   );
@@ -780,6 +834,32 @@ export function MessageComposer({
             </GatedButton>
           ) : null}
 
+          {/* Mobile: tap opens a large compose popup (inline box is too small to read). */}
+          <button
+            type="button"
+            onClick={openComposeSheet}
+            disabled={sessionExpired || readOnly}
+            title={readOnly ? t("readOnlyTitle") : t("expandComposer")}
+            className={cn(
+              "flex min-h-10 flex-1 items-center rounded-xl border border-border bg-muted px-4 py-2.5 text-left text-sm outline-none transition-colors md:hidden",
+              text.trim()
+                ? "text-foreground"
+                : "text-muted-foreground",
+              (sessionExpired || readOnly) && "cursor-not-allowed opacity-50",
+            )}
+          >
+            <span className="line-clamp-2 whitespace-pre-wrap wrap-break-word">
+              {text.trim()
+                ? text
+                : readOnly
+                  ? t("readOnlyPlaceholder")
+                  : sessionExpired
+                    ? t("sessionExpiredPlaceholder")
+                    : t("typeMessagePlaceholder")}
+            </span>
+          </button>
+
+          {/* Desktop / tablet: inline textarea */}
           <textarea
             ref={textareaRef}
             value={text}
@@ -796,7 +876,7 @@ export function MessageComposer({
             rows={1}
             title={readOnly ? t("readOnlyTitle") : undefined}
             className={cn(
-              "flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50",
+              "hidden flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50 md:block",
               (sessionExpired || readOnly) && "cursor-not-allowed opacity-50"
             )}
           />
@@ -875,6 +955,63 @@ export function MessageComposer({
         onOpenChange={setQuickReplyOpen}
         onPick={handlePickQuickReply}
       />
+
+      {/* Mobile compose popup — compact ~3–4 row typing area */}
+      <Dialog open={composeSheetOpen} onOpenChange={setComposeSheetOpen}>
+        <DialogContent
+          showCloseButton={false}
+          className="w-[calc(100%-1.5rem)] max-w-md gap-3 p-3 sm:max-w-md"
+        >
+          <DialogHeader className="space-y-0 pr-0">
+            <div className="flex items-center justify-between gap-2">
+              <DialogTitle className="text-base">
+                {t("composeTitle")}
+              </DialogTitle>
+              <button
+                type="button"
+                onClick={() => setComposeSheetOpen(false)}
+                className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("cancel")}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+          </DialogHeader>
+          <textarea
+            ref={sheetTextareaRef}
+            value={text}
+            onChange={handleSheetChange}
+            onKeyDown={handleKeyDown}
+            placeholder={t("typeMessagePlaceholder")}
+            rows={4}
+            className="h-[7.5rem] max-h-[7.5rem] min-h-[5.5rem] resize-none overflow-y-auto rounded-xl border border-border bg-muted px-3 py-2.5 text-base leading-relaxed text-foreground placeholder-muted-foreground outline-none focus:border-primary/50"
+          />
+          <DialogFooter className="flex-row gap-2 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setComposeSheetOpen(false)}
+            >
+              {t("cancel")}
+            </Button>
+            <GatedButton
+              type="button"
+              canAct={!readOnly}
+              gateReason="send messages"
+              disabled={sessionExpired || sending || !text.trim()}
+              onClick={() => void handleSend()}
+              className="bg-primary hover:bg-primary/90"
+            >
+              {sending ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="mr-1 h-4 w-4" />
+              )}
+              {t("send")}
+            </GatedButton>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
