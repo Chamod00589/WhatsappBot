@@ -53,9 +53,12 @@ export async function sendGeneratedCardImage(args: {
   }
 
   const path = buildMediaPath(accountId, filename)
+  // Copy into a tight Uint8Array — Node Buffer views can upload corrupt
+  // bytes to Storage (WhatsApp still works because Meta gets Uint8Array).
+  const uploadBody = new Uint8Array(bytes)
   const { error: uploadErr } = await db.storage
     .from('chat-media')
-    .upload(path, bytes, {
+    .upload(path, uploadBody, {
       cacheControl: '3600',
       upsert: false,
       contentType: mimeType,
@@ -88,7 +91,7 @@ export async function sendGeneratedCardImage(args: {
     const uploaded = await uploadWhatsAppMedia({
       phoneNumberId: config.phone_number_id,
       accessToken: decrypt(config.access_token),
-      bytes: new Uint8Array(bytes),
+      bytes: uploadBody,
       mimeType,
       filename,
     })

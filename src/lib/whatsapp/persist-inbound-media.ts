@@ -128,7 +128,7 @@ async function persistInboundWhatsAppMediaOnce(
 
   const { error: uploadErr } = await db.storage
     .from(CHAT_MEDIA_BUCKET)
-    .upload(path, buffer, {
+    .upload(path, new Uint8Array(buffer), {
       cacheControl: '31536000',
       upsert: true,
       contentType: safeMime,

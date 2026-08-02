@@ -68,28 +68,45 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
 
   const loadImage = useCallback(async () => {
     if (!url) return;
+    setError(false);
+    setLoading(true);
 
-    // Proxy URLs need auth fetch to create blob URL
-    if (url.startsWith("/api/whatsapp/media/")) {
+    const revokeIfBlob = (u: string | null) => {
+      if (u?.startsWith("blob:")) URL.revokeObjectURL(u);
+    };
+
+    // Auth proxy + some public storage URLs load more reliably as blobs
+    // (avoids opaque <img> failures on chat-media public URLs).
+    const shouldFetchBlob =
+      url.startsWith("/api/whatsapp/media/") ||
+      /\/storage\/v1\/object\/public\/chat-media\//i.test(url);
+
+    if (shouldFetchBlob) {
       try {
         const res = await fetch(url);
-        if (!res.ok) throw new Error("Failed to load media");
+        if (!res.ok) throw new Error(`Failed to load media (${res.status})`);
         const blob = await res.blob();
+        if (!blob.size) throw new Error("Empty media blob");
         const blobUrl = URL.createObjectURL(blob);
-        setSrc(blobUrl);
+        setSrc((prev) => {
+          revokeIfBlob(prev);
+          return blobUrl;
+        });
       } catch {
-        setError(true);
+        // Fall back to direct URL (e.g. CORS on public storage)
+        setSrc(url);
       } finally {
         setLoading(false);
       }
-    } else {
-      setSrc(url);
-      setLoading(false);
+      return;
     }
+
+    setSrc(url);
+    setLoading(false);
   }, [url]);
 
   useEffect(() => {
-    loadImage();
+    void loadImage();
     return () => {
       if (src?.startsWith("blob:")) {
         URL.revokeObjectURL(src);
