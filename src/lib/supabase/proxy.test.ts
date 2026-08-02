@@ -72,6 +72,17 @@ describe("proxy — refreshed auth cookies survive redirects", () => {
     expect(res.cookies.get(ROTATED.name)?.value).toBe(ROTATED.value);
   });
 
+  it("redirects a signed-in user from / (PWA start_url) to /inbox", async () => {
+    mockUser = { sub: "user-1" };
+    refreshedCookies = [ROTATED];
+
+    const res = await updateSession(new NextRequest("https://app.test/"));
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/inbox");
+    expect(res.cookies.get(ROTATED.name)?.value).toBe(ROTATED.value);
+  });
+
   it("carries the rotated token when redirecting an unauth user to /login", async () => {
     mockUser = null;
     refreshedCookies = [{ ...ROTATED, value: "cleared" }];

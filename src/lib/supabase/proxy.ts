@@ -75,9 +75,12 @@ export async function updateSession(request: NextRequest) {
     return response
   }
 
+  // Signed-in users hitting auth pages (or bare `/`) land on inbox —
+  // also the PWA start_url target after install.
   if (
     user &&
-    (request.nextUrl.pathname === '/login' ||
+    (request.nextUrl.pathname === '/' ||
+      request.nextUrl.pathname === '/login' ||
       request.nextUrl.pathname === '/signup' ||
       request.nextUrl.pathname === '/forgot-password')
   ) {
