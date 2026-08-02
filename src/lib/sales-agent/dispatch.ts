@@ -63,6 +63,7 @@ import {
   loadRecentlyOfferedProducts,
   parseColorOnlyReply,
   parseOrderPending,
+  productDisplayName,
   resolveLineItems,
   resolveOrderIntentsForAddress,
   shouldRunOrderIntake,
@@ -581,9 +582,12 @@ export async function dispatchSalesAgentNow(
       if (intents.length === 0) {
         log.step(
           'order',
-          'Address found but no bag — ask product + qty (resend offered QRs)',
+          'Address found but no bag in history — ask which product',
         )
-        const toOffer = offered.slice(0, 3)
+        // Only resend real product QRs (never FAQ / "Ask Request products")
+        const toOffer = offered
+          .filter((o) => Boolean(o.product_id))
+          .slice(0, 3)
         if (toOffer.length && config.productMatch) {
           for (const hit of toOffer) {
             if (!hit.catalog_message_id) continue
@@ -593,9 +597,7 @@ export async function dispatchSalesAgentNow(
                 accountId,
                 conversationId,
                 catalogMessageId: hit.catalog_message_id,
-                contextSummary:
-                  hit.description?.trim() ||
-                  `Resent product QR for order: ${hit.title}`,
+                contextSummary: `Sent product quick reply for ${productDisplayName(hit.title)}`,
               })
             } catch (err) {
               console.error('[sales-agent] order ask product QR failed:', err)
@@ -628,6 +630,7 @@ export async function dispatchSalesAgentNow(
         return
       }
 
+      // Bag known from history but color missing — ask color only (not "which bag")
       if (missingColor.length > 0 && ready.length === 0) {
         let availableColors: string[] = []
         const first = missingColor[0]
@@ -871,17 +874,23 @@ export async function dispatchSalesAgentNow(
       if (freshHits.length > 0) {
         // One QR fully complete (all images) before the next — queue inside
         // sendQuickReplyByCatalogId also serializes concurrent callers.
+        const intents = extractOrderIntents([inboundText], products)
         for (const hit of freshHits.slice(0, 8)) {
           if (!hit.catalog_message_id) continue
           try {
+            const display = productDisplayName(hit.title)
+            const intent = intents.find(
+              (i) =>
+                i.quickReplyId === hit.id ||
+                i.catalogMessageId === hit.catalog_message_id,
+            )
+            const colorNote = intent?.color ? ` (${intent.color})` : ''
             await sendQuickReplyByCatalogId({
               db,
               accountId,
               conversationId,
               catalogMessageId: hit.catalog_message_id,
-              contextSummary:
-                hit.description?.trim() ||
-                `Sent product quick reply: ${hit.title}`,
+              contextSummary: `Sent product quick reply for ${display}${colorNote}`,
             })
             handled = true
             log.step('send_qr', `Sent product QR: ${hit.title}`, {
@@ -893,10 +902,87 @@ export async function dispatchSalesAgentNow(
             console.error('[sales-agent] product QR send failed:', err)
           }
         }
+
+        // Remember bag(+color) so a follow-up address creates the order
+        // without asking "which bag" again.
+        if (config.createOrder && intents.length) {
+          try {
+            const items = await resolveLineItems(intents)
+            if (items.length && items.every((i) => i.color)) {
+              await db
+                .from('conversations')
+                .update({
+                  sa_order_pending: {
+                    type: 'awaiting_address',
+                    items: items.map((it) => ({
+                      productId: it.productId,
+                      name: it.name,
+                      color: it.color || '',
+                      qty: it.qty,
+                      price: it.price,
+                      image: it.image,
+                    })),
+                    askedAt: new Date().toISOString(),
+                  } satisfies OrderPendingState,
+                })
+                .eq('id', conversationId)
+              log.step(
+                'order',
+                'Saved bag+color from product ask — waiting for address',
+                { items },
+              )
+            } else if (items.length) {
+              // Bag named but color missing — still remember bags for address path
+              await db
+                .from('conversations')
+                .update({
+                  sa_order_pending: {
+                    type: 'awaiting_address',
+                    items: items.map((it) => ({
+                      productId: it.productId,
+                      name: it.name,
+                      color: it.color || '',
+                      qty: it.qty,
+                      price: it.price,
+                      image: it.image,
+                    })),
+                    askedAt: new Date().toISOString(),
+                  } satisfies OrderPendingState,
+                })
+                .eq('id', conversationId)
+            }
+          } catch (err) {
+            console.warn('[sales-agent] save awaiting_address failed:', err)
+          }
+        }
       } else if (hits.length > 0 && skipped.length > 0) {
         const intents = extractOrderIntents([inboundText], products)
         const withColor = intents.filter((i) => i.color)
         if (withColor.length && config.createOrder) {
+          try {
+            const items = await resolveLineItems(withColor)
+            if (items.length) {
+              await db
+                .from('conversations')
+                .update({
+                  sa_order_pending: {
+                    type: 'awaiting_address',
+                    items: items.map((it) => ({
+                      productId: it.productId,
+                      name: it.name,
+                      color: it.color || '',
+                      qty: it.qty,
+                      price: it.price,
+                      image: it.image,
+                    })),
+                    askedAt: new Date().toISOString(),
+                  } satisfies OrderPendingState,
+                })
+                .eq('id', conversationId)
+            }
+          } catch {
+            /* ignore */
+          }
           const ask = askBagAddressText(replyMode)
           await engineSendText({
             accountId,

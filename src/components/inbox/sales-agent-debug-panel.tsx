@@ -149,6 +149,9 @@ export function SalesAgentDebugPanel({
             <ul className="space-y-2">
               {runs.map((run) => {
                 const isOpen = expanded === run.id
+                const aiContextAll = formatAiContext(run.payload.ai_context)
+                const toolsAll = formatTools(run.payload.tools)
+                const stepsAll = formatSteps(run.payload.steps)
                 return (
                   <li
                     key={run.id}
@@ -192,7 +195,10 @@ export function SalesAgentDebugPanel({
                     {isOpen ? (
                       <div className="space-y-3 border-t border-border px-2.5 py-2">
                         {run.inbound_text ? (
-                          <Section title="Inbound">
+                          <Section
+                            title="Inbound"
+                            copyAllText={run.inbound_text}
+                          >
                             <CopyableBlock text={run.inbound_text} />
                           </Section>
                         ) : null}
@@ -209,7 +215,14 @@ export function SalesAgentDebugPanel({
                         ) : null}
 
                         {run.payload.capabilities ? (
-                          <Section title="Capabilities">
+                          <Section
+                            title="Capabilities"
+                            copyAllText={JSON.stringify(
+                              run.payload.capabilities,
+                              null,
+                              2,
+                            )}
+                          >
                             <CopyableBlock
                               text={JSON.stringify(
                                 run.payload.capabilities,
@@ -221,7 +234,11 @@ export function SalesAgentDebugPanel({
                         ) : null}
 
                         {run.payload.ai_context?.length ? (
-                          <Section title="AI context passed (compact)">
+                          <Section
+                            title="AI context passed (compact)"
+                            copyAllText={aiContextAll}
+                            copyAllLabel="Copy all msgs"
+                          >
                             <ul className="space-y-1">
                               {run.payload.ai_context.map((m, i) => (
                                 <li key={i}>
@@ -236,7 +253,15 @@ export function SalesAgentDebugPanel({
                         ) : null}
 
                         {run.payload.product_hits?.length ? (
-                          <Section title="Product matches">
+                          <Section
+                            title="Product matches"
+                            copyAllText={run.payload.product_hits
+                              .map(
+                                (h) =>
+                                  `${h.title}${h.catalog_message_id ? ` (${h.catalog_message_id})` : ''}`,
+                              )
+                              .join('\n')}
+                          >
                             <CopyableBlock
                               text={run.payload.product_hits
                                 .map(
@@ -256,7 +281,11 @@ export function SalesAgentDebugPanel({
                         ) : null}
 
                         {run.payload.tools?.length ? (
-                          <Section title="Tool calls">
+                          <Section
+                            title="Tool calls"
+                            copyAllText={toolsAll}
+                            copyAllLabel="Copy all tools"
+                          >
                             <ul className="space-y-1">
                               {run.payload.tools.map((t, i) => {
                                 const block = [
@@ -268,7 +297,10 @@ export function SalesAgentDebugPanel({
                                   .join('\n')
                                 return (
                                   <li key={i}>
-                                    <CopyableBlock label={t.name} text={block} />
+                                    <CopyableBlock
+                                      label={t.name}
+                                      text={block}
+                                    />
                                   </li>
                                 )
                               })}
@@ -277,7 +309,14 @@ export function SalesAgentDebugPanel({
                         ) : null}
 
                         {run.payload.reply ? (
-                          <Section title="Reply / outcome">
+                          <Section
+                            title="Reply / outcome"
+                            copyAllText={JSON.stringify(
+                              run.payload.reply,
+                              null,
+                              2,
+                            )}
+                          >
                             <CopyableBlock
                               text={JSON.stringify(run.payload.reply, null, 2)}
                             />
@@ -292,12 +331,19 @@ export function SalesAgentDebugPanel({
                         ) : null}
 
                         {run.payload.error ? (
-                          <Section title="Error">
+                          <Section
+                            title="Error"
+                            copyAllText={run.payload.error}
+                          >
                             <CopyableBlock text={run.payload.error} />
                           </Section>
                         ) : null}
 
-                        <Section title="Process steps">
+                        <Section
+                          title="Process steps"
+                          copyAllText={stepsAll}
+                          copyAllLabel="Copy all steps"
+                        >
                           <ol className="space-y-1.5 border-l-2 border-border pl-3">
                             {(run.payload.steps ?? []).map((s, i) => {
                               const stepText = [
@@ -364,12 +410,67 @@ export function SalesAgentDebugPanel({
   )
 }
 
-function CopyButton({ text }: { text: string }) {
+function formatAiContext(
+  msgs: Array<{ role: string; content: string }> | undefined,
+): string {
+  if (!msgs?.length) return ''
+  return msgs
+    .map((m) => `${m.role.toUpperCase()}\n${m.content}`)
+    .join('\n\n')
+}
+
+function formatTools(
+  tools: Array<{ name: string; arguments: unknown; result?: string }> | undefined,
+): string {
+  if (!tools?.length) return ''
+  return tools
+    .map((t) =>
+      [
+        t.name,
+        `args: ${safeJson(t.arguments)}`,
+        t.result ? `result: ${t.result}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    )
+    .join('\n\n---\n\n')
+}
+
+function formatSteps(
+  steps: Array<{
+    at: string
+    phase: string
+    detail: string
+    data?: unknown
+  }> | undefined,
+): string {
+  if (!steps?.length) return ''
+  return steps
+    .map((s) =>
+      [
+        `[${s.phase}] ${formatTime(s.at)}`,
+        s.detail,
+        s.data !== undefined ? safeJson(s.data) : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    )
+    .join('\n\n')
+}
+
+function CopyButton({
+  text,
+  label = 'Copy',
+}: {
+  text: string
+  label?: string
+}) {
   const [copied, setCopied] = useState(false)
 
   const onCopy = async (e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
+    if (!text) return
     try {
       await navigator.clipboard.writeText(text)
       setCopied(true)
@@ -383,7 +484,7 @@ function CopyButton({ text }: { text: string }) {
     <button
       type="button"
       onClick={onCopy}
-      title={copied ? 'Copied' : 'Copy'}
+      title={copied ? 'Copied' : label}
       className={cn(
         'inline-flex h-5 shrink-0 items-center gap-0.5 rounded px-1 text-[10px] transition-colors',
         copied
@@ -396,7 +497,7 @@ function CopyButton({ text }: { text: string }) {
       ) : (
         <Copy className="h-3 w-3" />
       )}
-      <span>{copied ? 'Copied' : 'Copy'}</span>
+      <span>{copied ? 'Copied' : label}</span>
     </button>
   )
 }
@@ -453,13 +554,22 @@ function StatusPill({ status }: { status: string }) {
 function Section({
   title,
   children,
+  copyAllText,
+  copyAllLabel = 'Copy all',
 }: {
   title: string
   children: React.ReactNode
+  copyAllText?: string
+  copyAllLabel?: string
 }) {
   return (
     <div>
-      <p className="mb-1 font-medium text-foreground">{title}</p>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <p className="font-medium text-foreground">{title}</p>
+        {copyAllText ? (
+          <CopyButton text={copyAllText} label={copyAllLabel} />
+        ) : null}
+      </div>
       {children}
     </div>
   )

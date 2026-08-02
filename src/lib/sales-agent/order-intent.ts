@@ -484,10 +484,6 @@ export async function loadRecentlyOfferedProducts(
   const strongBlob = rows
     .map((m) => (m.ai_context_summary || '').toLowerCase())
     .join('\n')
-  const weakBlob = rows
-    .map((m) => `${m.content_text || ''}\n${m.ai_context_summary || ''}`)
-    .join('\n')
-    .toLowerCase()
 
   const offered: MatchableQuickReply[] = []
   const seen = new Set<string>()
@@ -501,32 +497,30 @@ export async function loadRecentlyOfferedProducts(
 
   // Pass 1: strong signals from identify / product QR context summaries
   for (const p of catalog) {
+    if (!p.product_id) continue
     const title = productDisplayName(p.title).toLowerCase()
     const catalogId = (p.catalog_message_id || '').toLowerCase()
+    const first = title.split(' ')[0] || ''
     const hit =
       (catalogId && strongBlob.includes(catalogId)) ||
       (title.length >= 4 &&
         (strongBlob.includes(`sent product quick reply for ${title}`) ||
           strongBlob.includes(`sent product quick reply: ${title}`) ||
+          strongBlob.includes(`sent product quick reply for ${first}`) ||
           (strongBlob.includes('after image identify') &&
-            strongBlob.includes(title.split(' ')[0] || '')) ||
-          strongBlob.includes(
-            `confirmed identify: ${title.split(' ')[0] || ''}`,
-          )))
+            first.length >= 4 &&
+            strongBlob.includes(first)) ||
+          (first.length >= 4 &&
+            strongBlob.includes(`confirmed identify: ${first}`))))
     if (hit) tryPush(p)
   }
 
-  // Pass 2: only if nothing found — looser title match on summaries (not body text)
+  // Pass 2: only if nothing found — looser title match on summaries
   if (!offered.length) {
     for (const p of catalog) {
+      if (!p.product_id) continue
       const title = productDisplayName(p.title).toLowerCase()
-      if (
-        title.length >= 5 &&
-        (strongBlob.includes(title) ||
-          weakBlob.includes(`sent product quick reply`))
-      ) {
-        if (strongBlob.includes(title) || weakBlob.includes(title)) tryPush(p)
-      }
+      if (title.length >= 5 && strongBlob.includes(title)) tryPush(p)
     }
   }
 
@@ -537,8 +531,9 @@ export async function loadRecentlyOfferedProducts(
  * Resolve bag/color/qty for an address message from recent customer text
  * and/or products we already sent as QRs (identify / product match).
  *
- * Prefer recently offered (identified) bags over older bag-name mentions
- * in chat history when the address message itself does not name a product.
+ * Prefer bags the customer already named in chat history (e.g. "cloudy eke
+ * black eka") over loosely matched offered QRs. Only fall back to offered
+ * product-backed QRs when history has no bag mention.
  */
 export function resolveOrderIntentsForAddress(args: {
   customerTexts: string[]
@@ -555,28 +550,34 @@ export function resolveOrderIntentsForAddress(args: {
   )
   if (fromAddress.length) return fromAddress
 
+  // History bag mentions win (cloudy + black before address)
+  const fromPrior = extractOrderIntents(priorTexts, catalog)
+  if (fromPrior.length) return fromPrior
+
+  // Also try full join in case ordering dropped a line
+  const fromAll = extractOrderIntents(
+    customerTexts.filter(Boolean),
+    catalog,
+  )
+  if (fromAll.length) return fromAll
+
+  const productOffered = offeredProducts.filter((p) => Boolean(p.product_id))
+  if (!productOffered.length) return []
+
   const mergedPrior = priorTexts.filter(Boolean).join('\n')
   const colors = extractColorsFromText(
     [addressText, mergedPrior].filter(Boolean).join('\n'),
   )
   const qty = extractQty(mergedPrior || addressText)
 
-  // Prefer offered (identify QR) over older text matches
-  if (offeredProducts.length) {
-    return offeredProducts.map((p, i) => ({
-      productId: p.product_id,
-      catalogMessageId: p.catalog_message_id,
-      name: productDisplayName(p.title),
-      color: colors[i] || (colors.length === 1 ? colors[0] : null),
-      qty,
-      quickReplyId: p.id,
-    }))
-  }
-
-  const fromPrior = extractOrderIntents(priorTexts, catalog)
-  if (fromPrior.length) return fromPrior
-
-  return []
+  return productOffered.map((p, i) => ({
+    productId: p.product_id,
+    catalogMessageId: p.catalog_message_id,
+    name: productDisplayName(p.title),
+    color: colors[i] || (colors.length === 1 ? colors[0] : null),
+    qty,
+    quickReplyId: p.id,
+  }))
 }
 
 export function buildColorAskText(

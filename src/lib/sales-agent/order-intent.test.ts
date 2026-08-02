@@ -95,6 +95,20 @@ Dehiattakandiya
     expect(isAddressLikeMessage(bare)).toBe(true)
   })
 
+  it('prefers bag+color from chat history over offered when address follows', () => {
+    const intents = resolveOrderIntentsForAddress({
+      customerTexts: [
+        'Dulakshi\nThamuttegama\nDeweni piyawara\n0778851020',
+        'cloudy eke black eka ganna puluwanda',
+      ],
+      catalog: [cloudy],
+      offeredProducts: [],
+    })
+    expect(intents).toHaveLength(1)
+    expect(intents[0]?.name.toLowerCase()).toContain('cloudy')
+    expect(intents[0]?.color?.toLowerCase()).toBe('black')
+  })
+
   it('resolves bag from text when address-only follows prior ask', () => {
     const intents = resolveOrderIntentsForAddress({
       customerTexts: [
