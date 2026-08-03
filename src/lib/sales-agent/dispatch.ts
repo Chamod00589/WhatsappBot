@@ -146,11 +146,14 @@ export async function dispatchSalesAgentNow(
       return
     }
 
+    const forceManual = args.forceManual === true
+
     const gate = await evaluateSalesAgentGates(db, {
       accountId,
       conversationId,
       contactId,
       config,
+      forceManual,
     })
     if (!gate.ok) {
       await log.skip(gate.reason, `Gate blocked: ${gate.reason}`)
@@ -160,29 +163,34 @@ export async function dispatchSalesAgentNow(
       ai_reply_count: gate.conversation.ai_reply_count,
       has_identify_pending: Boolean(gate.conversation.sa_identify_pending),
       has_order_pending: Boolean(gate.conversation.sa_order_pending),
+      forceManual,
     })
 
-    const { data: autoResponders } = await db
-      .from('automations')
-      .select('id')
-      .eq('account_id', accountId)
-      .eq('is_active', true)
-      .in('trigger_type', ['new_message_received', 'keyword_match'])
-      .limit(1)
-    if (autoResponders && autoResponders.length > 0) {
-      await log.skip(
-        'automation_active',
-        'Active new_message/keyword automations — Sales Agent stands down',
-      )
-      return
-    }
+    if (!forceManual) {
+      const { data: autoResponders } = await db
+        .from('automations')
+        .select('id')
+        .eq('account_id', accountId)
+        .eq('is_active', true)
+        .in('trigger_type', ['new_message_received', 'keyword_match'])
+        .limit(1)
+      if (autoResponders && autoResponders.length > 0) {
+        await log.skip(
+          'automation_active',
+          'Active new_message/keyword automations — Sales Agent stands down',
+        )
+        return
+      }
 
-    if (gate.conversation.ai_reply_count >= config.autoReplyMaxPerConversation) {
-      await log.skip(
-        'reply_cap',
-        `Reply cap reached (${gate.conversation.ai_reply_count}/${config.autoReplyMaxPerConversation})`,
-      )
-      return
+      if (gate.conversation.ai_reply_count >= config.autoReplyMaxPerConversation) {
+        await log.skip(
+          'reply_cap',
+          `Reply cap reached (${gate.conversation.ai_reply_count}/${config.autoReplyMaxPerConversation})`,
+        )
+        return
+      }
+    } else {
+      log.step('gate', 'Manual inbox Reply-with-AI — skipped automation/reply-cap gates')
     }
 
     const acctLimit = checkRateLimit(

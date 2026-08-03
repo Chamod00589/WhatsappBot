@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { Sparkles, Hand, Undo2, Loader2 } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { Sparkles, Hand, Undo2, Loader2, Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { useAuth } from "@/hooks/use-auth";
+import type { Message } from "@/types";
 
 // ------------------------------------------------------------
 // Account AI status is the same for every conversation, so cache it per
@@ -42,6 +43,19 @@ async function fetchAiAccountStatus(accountId: string): Promise<AiAccountStatus>
   }
 }
 
+/** True when the latest message(s) are from the customer with no agent/bot reply after. */
+export function hasUnansweredCustomerMessages(
+  messages: Pick<Message, "sender_type">[] | null | undefined,
+): boolean {
+  if (!messages?.length) return false;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const s = messages[i]?.sender_type;
+    if (s === "customer") return true;
+    if (s === "agent" || s === "bot") return false;
+  }
+  return false;
+}
+
 interface AiThreadBannerProps {
   conversationId: string;
   /** `conversations.ai_autoreply_disabled` — bot paused on this thread. */
@@ -53,6 +67,8 @@ interface AiThreadBannerProps {
   assignedAgentId?: string | null;
   /** The acting agent — "Take over" assigns the thread to them. */
   currentUserId?: string | null;
+  /** Thread messages — used to show Reply with AI when paused + unanswered. */
+  messages?: Message[] | null;
   /** Called after a successful toggle so the parent can patch its local
    *  conversation state (the realtime UPDATE also arrives, but this keeps
    *  the banner instant). */
@@ -67,6 +83,7 @@ interface AiThreadBannerProps {
  * conversation:
  *   - bot active here → "AI is replying automatically" + [Take over]
  *   - bot paused here → the handoff note (if any) + [Resume AI]
+ *     and, if customer msgs are unanswered, [Reply with AI]
  * Renders nothing when the account has no auto-reply configured, or when
  * the bot is active but a human already owns the thread (nothing to do).
  */
@@ -76,17 +93,24 @@ export function AiThreadBanner({
   handoffSummary,
   assignedAgentId,
   currentUserId,
+  messages,
   onChange,
 }: AiThreadBannerProps) {
   const t = useTranslations("Inbox.aiBanner");
   const { accountId } = useAuth();
   const [autoReplyOn, setAutoReplyOn] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
+  const [replyBusy, setReplyBusy] = useState(false);
   // Optimistic local mirror of the pause flag so the banner flips
   // instantly on click; re-seeds whenever the thread (or its server
   // state via realtime) changes.
   const [paused, setPaused] = useState(disabled);
   useEffect(() => setPaused(disabled), [conversationId, disabled]);
+
+  const needsAgentReply = useMemo(
+    () => hasUnansweredCustomerMessages(messages),
+    [messages],
+  );
 
   useEffect(() => {
     if (!accountId) return;
@@ -134,6 +158,28 @@ export function AiThreadBanner({
     [conversationId, currentUserId, onChange, t],
   );
 
+  const replyWithAi = useCallback(async () => {
+    if (replyBusy) return;
+    setReplyBusy(true);
+    try {
+      const res = await fetch("/api/sales-agent/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(j?.error ?? t("replyError"));
+        return;
+      }
+      toast.success(t("replyQueued"));
+    } catch {
+      toast.error(t("networkError"));
+    } finally {
+      setReplyBusy(false);
+    }
+  }, [conversationId, replyBusy, t]);
+
   // Account has no auto-reply → nothing to show. (Still loading → nothing.)
   if (!autoReplyOn) return null;
 
@@ -148,10 +194,20 @@ export function AiThreadBanner({
               {handoffSummary}
             </p>
           )}
+          {needsAgentReply && (
+            <p className="mt-0.5 text-muted-foreground">{t("unansweredHint")}</p>
+          )}
         </div>
-        <BannerButton onClick={() => toggle(false)} busy={busy} icon={Undo2}>
-          {t("resume")}
-        </BannerButton>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {needsAgentReply && (
+            <BannerButton onClick={replyWithAi} busy={replyBusy} icon={Bot}>
+              {t("replyWithAi")}
+            </BannerButton>
+          )}
+          <BannerButton onClick={() => toggle(false)} busy={busy} icon={Undo2}>
+            {t("resume")}
+          </BannerButton>
+        </div>
       </Banner>
     );
   }
@@ -163,7 +219,7 @@ export function AiThreadBanner({
   return (
     <Banner tone="primary">
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
-        <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-primary" />
+        <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" />
         <span className="truncate font-medium text-foreground">
           {t("activeText")}
         </span>
@@ -212,7 +268,7 @@ function BannerButton({
       type="button"
       onClick={onClick}
       disabled={busy}
-      className="inline-flex flex-shrink-0 items-center gap-1 rounded-md border border-border bg-card px-2.5 py-1 font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-60"
+      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-card px-2.5 py-1 font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-60"
     >
       {busy ? (
         <Loader2 className="h-3 w-3 animate-spin" />

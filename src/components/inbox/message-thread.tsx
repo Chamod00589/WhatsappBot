@@ -1074,9 +1074,14 @@ export function MessageThread({
         handoffSummary={conversation.ai_handoff_summary}
         assignedAgentId={assignedAgentId}
         currentUserId={user?.id}
+        messages={messages}
         onChange={(patch) => {
           if ("assigned_agent_id" in patch) {
             onAssignChange(conversation.id, patch.assigned_agent_id ?? null);
+          }
+          // Resume AI clears Human / Unread tags server-side — refresh chips.
+          if (!patch.ai_autoreply_disabled) {
+            setTagsRefreshKey((n) => n + 1);
           }
         }}
       />

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import { removeNamedTag } from '@/lib/sales-agent/tags'
 
 type Params = { params: Promise<{ conversationId: string }> }
 
@@ -17,9 +18,9 @@ type Params = { params: Promise<{ conversationId: string }> }
  *                     fires the `on_conversation_assigned` trigger.
  *   - paused: false → hand the thread back to the bot: clear the pause,
  *                     reset the per-conversation reply count so it gets
- *                     fresh slots, and clear the handoff note. If the
- *                     caller currently owns the thread, unassign it too so
- *                     the bot isn't blocked by the "human owns this" gate.
+ *                     fresh slots, clear the handoff note, and remove
+ *                     "Human" / "Unread" contact tags if present (those
+ *                     are set by handoff / agent-unable paths).
  *
  * Writes go through the RLS-scoped SSR client, so a conversation outside
  * the caller's account simply isn't found (404).
@@ -47,7 +48,7 @@ export async function POST(request: Request, { params }: Params) {
     // Confirm the conversation is in the caller's account before writing.
     const { data: conv, error: convErr } = await supabase
       .from('conversations')
-      .select('id')
+      .select('id, contact_id')
       .eq('id', conversationId)
       .eq('account_id', accountId)
       .maybeSingle()
@@ -94,6 +95,20 @@ export async function POST(request: Request, { params }: Params) {
         { error: 'Failed to update conversation' },
         { status: 500 },
       )
+    }
+
+    // Resume AI → drop handoff tags so the contact no longer shows as
+    // needing a human (gates also block on the "Human" tag).
+    if (!paused && conv.contact_id) {
+      try {
+        await Promise.all([
+          removeNamedTag(supabase, accountId, conv.contact_id, 'Human'),
+          removeNamedTag(supabase, accountId, conv.contact_id, 'Unread'),
+        ])
+      } catch (tagErr) {
+        // Conversation is already resumed; tag cleanup is best-effort.
+        console.warn('[ai/autoreply] clear Human/Unread tags failed:', tagErr)
+      }
     }
 
     return NextResponse.json({ success: true, paused })

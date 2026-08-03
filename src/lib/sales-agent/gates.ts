@@ -134,6 +134,8 @@ export function parseSalesCapabilities(row: Record<string, unknown>): {
 
 /**
  * Eligibility gates for Sales Agent. Returns skip reasons silently.
+ * `forceManual` (inbox "Reply with AI") skips Human / assigned / paused
+ * so a paused thread can still get one agent answer for unanswered mail.
  */
 export async function evaluateSalesAgentGates(
   db: SupabaseClient,
@@ -142,9 +144,11 @@ export async function evaluateSalesAgentGates(
     conversationId: string
     contactId: string
     config: AiConfigWithSales | null
+    forceManual?: boolean
   },
 ): Promise<GateResult | GateSkip> {
   const { accountId, conversationId, contactId, config } = args
+  const forceManual = args.forceManual === true
   if (!config || !config.autoReplyEnabled) {
     return { ok: false, reason: 'ai_off' }
   }
@@ -153,7 +157,7 @@ export async function evaluateSalesAgentGates(
   }
 
   const hasHumanTag = await contactHasHumanTag(db, accountId, contactId)
-  if (hasHumanTag) {
+  if (hasHumanTag && !forceManual) {
     return { ok: false, reason: 'human_tag' }
   }
 
@@ -166,8 +170,12 @@ export async function evaluateSalesAgentGates(
     .maybeSingle()
 
   if (error || !conv) return { ok: false, reason: 'no_conversation' }
-  if (conv.assigned_agent_id) return { ok: false, reason: 'assigned' }
-  if (conv.ai_autoreply_disabled) return { ok: false, reason: 'paused' }
+  if (conv.assigned_agent_id && !forceManual) {
+    return { ok: false, reason: 'assigned' }
+  }
+  if (conv.ai_autoreply_disabled && !forceManual) {
+    return { ok: false, reason: 'paused' }
+  }
 
   return {
     ok: true,
@@ -180,6 +188,6 @@ export async function evaluateSalesAgentGates(
       sa_last_question_fp: conv.sa_last_question_fp ?? null,
       sa_order_pending: conv.sa_order_pending ?? null,
     },
-    hasHumanTag: false,
+    hasHumanTag,
   }
 }

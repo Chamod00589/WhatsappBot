@@ -53,6 +53,12 @@ export interface SalesAgentDispatchArgs {
   }>
   /** CTWA / FB ads referral — agent uses ad copy to identify the product. */
   referral?: MessageReferral | null
+  /**
+   * Inbox "Reply with AI" — bypass pause / Human / assigned gates so an
+   * agent can still answer unanswered customer messages while the
+   * thread stays paused for humans.
+   */
+  forceManual?: boolean
   /** True when this is the contact's first-ever inbound. */
   isFirstInboundMessage?: boolean
   /**
