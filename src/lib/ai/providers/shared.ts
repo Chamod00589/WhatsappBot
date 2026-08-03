@@ -59,11 +59,8 @@ export async function providerHttpError(
 ): Promise<AiError> {
   let detail = ''
   try {
-    const body = (await res.json()) as { error?: { message?: string } | string }
-    detail =
-      typeof body?.error === 'string'
-        ? body.error
-        : (body?.error?.message ?? '')
+    const body = (await res.json()) as unknown
+    detail = extractProviderErrorDetail(body)
   } catch {
     // Non-JSON error body — fall back to the status line.
   }
@@ -95,6 +92,38 @@ export async function providerHttpError(
     // can show "invalid key"; everything else is an upstream 502.
     status: code === 'invalid_key' ? 401 : 502,
   })
+}
+
+/** Pull a human-readable message from OpenAI / Gemini / OpenRouter error JSON. */
+function extractProviderErrorDetail(body: unknown): string {
+  if (!body) return ''
+  // Gemini sometimes returns `[{ error: { message, code, status } }]`
+  if (Array.isArray(body) && body[0]) {
+    return extractProviderErrorDetail(body[0])
+  }
+  if (typeof body !== 'object') return String(body)
+  const o = body as {
+    error?:
+      | string
+      | {
+          message?: string
+          status?: string
+          code?: number | string
+          details?: unknown
+        }
+    message?: string
+  }
+  if (typeof o.error === 'string') return o.error
+  if (o.error && typeof o.error === 'object') {
+    const parts = [
+      o.error.message,
+      o.error.status,
+      typeof o.error.code === 'string' ? o.error.code : undefined,
+    ].filter(Boolean)
+    return parts.join(' — ') || ''
+  }
+  if (typeof o.message === 'string') return o.message
+  return ''
 }
 
 /**

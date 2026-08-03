@@ -208,6 +208,18 @@ async function runOpenAiToolLoop(
   const timeoutMs = aiRequestTimeoutMs()
   const execCtx = buildExecContext(args)
 
+  type GeminiExtraContent = {
+    google?: { thought_signature?: string }
+  }
+
+  type RawToolCall = {
+    id: string
+    type?: string
+    function?: { name?: string; arguments?: string }
+    /** Gemini 3 OpenAI-compat: must be echoed on the next request. */
+    extra_content?: GeminiExtraContent
+  }
+
   type ApiMessage =
     | { role: 'system'; content: string }
     | { role: 'user' | 'assistant'; content: string }
@@ -218,6 +230,7 @@ async function runOpenAiToolLoop(
           id: string
           type: 'function'
           function: { name: string; arguments: string }
+          extra_content?: GeminiExtraContent
         }>
       }
     | { role: 'tool'; tool_call_id: string; content: string }
@@ -256,6 +269,13 @@ async function runOpenAiToolLoop(
       }
     } else if (config.provider === 'gemini') {
       body.max_tokens = MAX_OUTPUT_TOKENS
+      // Gemini 3.x Flash-Lite defaults to thinking; keep it minimal for
+      // fast tool loops (signatures are still required and preserved).
+      body.extra_body = {
+        google: {
+          thinking_config: { thinking_level: 'minimal' },
+        },
+      }
     } else {
       body.max_completion_tokens = MAX_OUTPUT_TOKENS
     }
@@ -356,7 +376,26 @@ async function runOpenAiToolLoop(
       if (err instanceof AiError) throw err
       throw toNetworkError(err)
     }
-    if (!res.ok) throw await providerHttpError(config.provider, res)
+    if (!res.ok) {
+      // Product/FAQ already sent on an earlier round — don't fail the whole
+      // turn (and tag Human) because Gemini rejected the follow-up request
+      // (common before thought_signature echo was preserved).
+      if (replied) {
+        const err = await providerHttpError(
+          config.provider === 'gemini' ? 'Gemini' : config.provider,
+          res,
+        )
+        args.debug?.step(
+          'policy',
+          `Follow-up model round failed after a successful tool reply — stopping cleanly: ${err.message}`,
+        )
+        break
+      }
+      throw await providerHttpError(
+        config.provider === 'gemini' ? 'Gemini' : config.provider,
+        res,
+      )
+    }
     if (usedModel !== config.model) {
       args.debug?.step('ai_tools', `Using fallback model ${usedModel}`)
     }
@@ -365,10 +404,7 @@ async function runOpenAiToolLoop(
       choices?: {
         message?: {
           content?: string | null
-          tool_calls?: Array<{
-            id: string
-            function?: { name?: string; arguments?: string }
-          }>
+          tool_calls?: RawToolCall[]
         }
         finish_reason?: string
       }[]
@@ -387,7 +423,8 @@ async function runOpenAiToolLoop(
     usageAcc = mergeUsage(usageAcc, roundUsage)
 
     const msg = data.choices?.[0]?.message
-    const toolCalls: ToolCallRequest[] = (msg?.tool_calls ?? [])
+    const rawToolCalls = msg?.tool_calls ?? []
+    const toolCalls: ToolCallRequest[] = rawToolCalls
       .map((tc) => {
         let parsed: Record<string, unknown> = {}
         try {
@@ -431,17 +468,23 @@ async function runOpenAiToolLoop(
       break
     }
 
+    // Echo tool_calls exactly as Gemini returned them — including
+    // `extra_content.google.thought_signature`. Reconstructing drops the
+    // signature and Gemini 3 returns HTTP 400 on the next round.
     apiMessages.push({
       role: 'assistant',
       content: text || null,
-      tool_calls: toolCalls.map((tc) => ({
-        id: tc.id,
-        type: 'function' as const,
-        function: {
-          name: tc.name,
-          arguments: JSON.stringify(tc.arguments ?? {}),
-        },
-      })),
+      tool_calls: rawToolCalls
+        .filter((tc) => tc.id && tc.function?.name)
+        .map((tc) => ({
+          id: tc.id,
+          type: 'function' as const,
+          function: {
+            name: tc.function!.name!,
+            arguments: tc.function?.arguments || '{}',
+          },
+          ...(tc.extra_content ? { extra_content: tc.extra_content } : {}),
+        })),
     })
 
     for (const call of toolCalls) {
