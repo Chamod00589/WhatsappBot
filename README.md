@@ -174,3 +174,4 @@ rather than here. Details in
 <!-- https://openrouter.ai/settings/profile -->
 <!-- https://huggingface.co/spaces/chamod482/OpenaiClip/tree/main -->
 <!-- https://supabase.com/dashboard/project/kuewhykpbwqtzsqejlmw/sql/new -->
+<!-- https://vercel.com/ladiesbagslk-2828s-projects/whatsapp-bot/deployments -->

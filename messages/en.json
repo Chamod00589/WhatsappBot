@@ -1775,7 +1775,7 @@
       "encryptionNotice": "Your key is encrypted at rest (AES-256-GCM) and never shown again after saving.",
       "provider": "Provider",
       "model": "Model",
-      "openrouterZdrHint": "If you use Zero Data Retention on OpenRouter, prefer google/gemini-2.5-flash. openai/gpt-4o-mini only works via Azure under OpenAI ZDR (often needs BYOK). Privacy: openrouter.ai/settings/privacy",
+      "openrouterZdrHint": "Primary model is tried first. If it hits rate/quota limits (e.g. free Gemini), OpenRouter auto-falls back to up to 3 models: gemini-2.5-flash-lite → gemini-2.0-flash → Llama :free. Override with env OPENROUTER_FALLBACK_MODELS (max 3). For ZDR privacy, prefer google/gemini-2.5-flash. Privacy: openrouter.ai/settings/privacy",
       "apiKey": "API key",
       "testKey": "Test key",
       "testSuccess": "Key works — the provider responded.",

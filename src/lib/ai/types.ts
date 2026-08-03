@@ -6,13 +6,14 @@
 // whether the account is on OpenAI or Anthropic.
 // ============================================================
 
-export type AiProvider = 'openai' | 'anthropic' | 'openrouter'
+export type AiProvider = 'openai' | 'anthropic' | 'openrouter' | 'gemini'
 
 /** Providers accepted by the AI config / test APIs. */
 export const AI_PROVIDERS: readonly AiProvider[] = [
   'openai',
   'anthropic',
   'openrouter',
+  'gemini',
 ] as const
 
 export function isAiProvider(value: unknown): value is AiProvider {

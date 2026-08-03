@@ -106,7 +106,7 @@ export async function POST(request: Request) {
 
     const provider = body.provider as AiProvider
     if (!isAiProvider(provider)) {
-      return bad('provider must be "openai", "anthropic", or "openrouter"')
+      return bad('provider must be "openai", "anthropic", "openrouter", or "gemini"')
     }
     const model = typeof body.model === 'string' ? body.model.trim() : ''
     if (!model) return bad('model is required')

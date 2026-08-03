@@ -42,12 +42,14 @@ const PROVIDER_LABEL: Record<AiProvider, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic (Claude)',
   openrouter: 'OpenRouter',
+  gemini: 'Google Gemini',
 };
 
 const KEY_PLACEHOLDER: Record<AiProvider, string> = {
   openai: 'sk-...',
   anthropic: 'sk-ant-...',
   openrouter: 'sk-or-...',
+  gemini: 'AIza... or AQ....',
 };
 
 export function AiConfig() {
@@ -312,6 +314,9 @@ export function AiConfig() {
                     <SelectItem value="openrouter">
                       {PROVIDER_LABEL.openrouter}
                     </SelectItem>
+                    <SelectItem value="gemini">
+                      {PROVIDER_LABEL.gemini}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -328,6 +333,11 @@ export function AiConfig() {
                 {provider === 'openrouter' ? (
                   <p className="text-xs text-muted-foreground">
                     {t('openrouterZdrHint')}
+                  </p>
+                ) : provider === 'gemini' ? (
+                  <p className="text-xs text-muted-foreground">
+                    Google AI Studio key. Default model gemini-3.1-flash-lite;
+                    on free-tier quota it falls back to gemini-2.5-flash-lite.
                   </p>
                 ) : null}
               </div>

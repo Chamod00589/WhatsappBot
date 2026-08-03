@@ -15,6 +15,8 @@ export const AI_PROVIDER_DEFAULT_MODEL: Record<AiProvider, string> = {
   anthropic: 'claude-haiku-4-5-20251001',
   // OpenRouter model slugs are `vendor/model` — browse openrouter.ai/models.
   openrouter: 'google/gemini-2.5-flash',
+  // Google AI Studio model ids — ai.google.dev/gemini-api/docs/models
+  gemini: 'gemini-3.1-flash-lite',
 }
 
 /**
