@@ -28,6 +28,7 @@ import {
   enrichQuotationLineItems,
   sendQuotationScreenshot,
 } from '../quotation-screenshot'
+import { maybeSendAddressRequestQrOnce } from '../address-request-qr'
 import { addNamedTag } from '../tags'
 import { CONTEXT_BLURBS } from '../types'
 
@@ -328,44 +329,14 @@ export async function actionSendQuotation(args: {
     contactId,
     configOwnerUserId,
     items,
-    useSinglish,
   } = args
   if (!items.length) return { ok: false, message: 'No items for quotation' }
 
-  const caption = useSinglish
-    ? [
-        'මිලදී ගැනීම සඳහා කරුණාකර පහත විස්තර අප වෙත එවන්න. 😊',
-        '',
-        '📌 Name:',
-        '📌 Address:',
-        '📌 Town',
-        '📌 Phone 01:',
-        '📌 Phone 02 (if available):',
-      ].join('\n')
-    : [
-        'வாங்குவதற்கு, தயவுசெய்து கீழே உள்ள விவரங்களை எங்களுக்கு அனுப்புங்கள். 😊',
-        '',
-        '📌 பெயர்:',
-        '📌 முகவரி:',
-        '📌 அருகிலுள்ள நகரம்:',
-        '📌 தொலைபேசி எண் 01:',
-        '📌 தொலைபேசி எண் 02 (இருந்தால்):',
-      ].join('\n')
-
+  // Address format is NOT captioned on the quotation — the Address Quick
+  // Reply is sent once per chat after the first successful quote.
   const enriched = await enrichQuotationLineItems(db, accountId, items)
 
-  try {
-    const shot = await sendQuotationScreenshot({
-      db,
-      accountId,
-      conversationId,
-      contactId,
-      configOwnerUserId,
-      items: enriched,
-      caption,
-    })
-    // Remember quoted lines so a follow-up address creates the order with
-    // the same catalog names / qty / colors (avoids "Bloom Bag" mismatch).
+  const rememberPending = async () => {
     await db
       .from('conversations')
       .update({
@@ -383,15 +354,40 @@ export async function actionSendQuotation(args: {
         },
       })
       .eq('id', conversationId)
+  }
 
-    return {
-      ok: true,
-      message: `Quotation screenshot sent (${shot.sendMode}, ${Math.round(shot.bytes / 1024)}kb, meta=${shot.metaMediaId || 'none'}, url=${shot.publicUrl})`,
-    }
+  const afterQuoteExtras = async (baseMessage: string) => {
+    const addr = await maybeSendAddressRequestQrOnce({
+      db,
+      accountId,
+      conversationId,
+      contactId,
+      configOwnerUserId,
+    })
+    return addr.sent ? `${baseMessage}; ${addr.note}` : baseMessage
+  }
+
+  try {
+    const shot = await sendQuotationScreenshot({
+      db,
+      accountId,
+      conversationId,
+      contactId,
+      configOwnerUserId,
+      items: enriched,
+    })
+    // Remember quoted lines so a follow-up address creates the order with
+    // the same catalog names / qty / colors (avoids "Bloom Bag" mismatch).
+    await rememberPending()
+
+    const message = await afterQuoteExtras(
+      `Quotation screenshot sent (${shot.sendMode}, ${Math.round(shot.bytes / 1024)}kb, meta=${shot.metaMediaId || 'none'}, url=${shot.publicUrl})`,
+    )
+    return { ok: true, message }
   } catch (err) {
     console.error('[sales-agent] quotation screenshot failed:', err)
     const errMsg = err instanceof Error ? err.message : String(err)
-    // Fallback: text quotation (same numbers)
+    // Fallback: text quotation (same numbers) — no address-format caption
     const lines: string[] = ['*Price Quotation*', '']
     let sub = 0
     for (const it of enriched) {
@@ -402,8 +398,6 @@ export async function actionSendQuotation(args: {
     }
     lines.push(`Shipping: ${formatLkr(QUOTATION_SHIPPING_LKR)}`)
     lines.push(`Total: ${formatLkr(sub + QUOTATION_SHIPPING_LKR)}`)
-    lines.push('')
-    lines.push(caption)
 
     await engineSendText({
       accountId,
@@ -414,27 +408,11 @@ export async function actionSendQuotation(args: {
       aiGenerated: true,
     })
     await stampSummary(db, conversationId, CONTEXT_BLURBS.quotation)
-    await db
-      .from('conversations')
-      .update({
-        sa_order_pending: {
-          type: 'awaiting_address',
-          items: enriched.map((it) => ({
-            productId: it.productId,
-            name: it.name,
-            color: it.color || '',
-            qty: it.qty,
-            price: it.price,
-            image: it.image,
-          })),
-          askedAt: new Date().toISOString(),
-        },
-      })
-      .eq('id', conversationId)
-    return {
-      ok: true,
-      message: `Quotation text sent (screenshot failed: ${errMsg})`,
-    }
+    await rememberPending()
+    const message = await afterQuoteExtras(
+      `Quotation text sent (screenshot failed: ${errMsg})`,
+    )
+    return { ok: true, message }
   }
 }
 

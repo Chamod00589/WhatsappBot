@@ -87,4 +87,6 @@ export const CONTEXT_BLURBS = {
   tracking: 'tracking info msg include latest order tracking status',
   quotation: 'quotation msg include selected bags prices and shipping',
   identifyConfirm: 'asked customer to confirm identified bag match',
+  addressRequest:
+    'sent Address Quick Reply (order address format) — once per chat unless customer asks again',
 } as const

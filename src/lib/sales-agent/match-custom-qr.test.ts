@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  findAddressRequestQr,
   findCustomQuickReply,
   matchCustomQuickReplies,
   type CustomQuickReply,
@@ -55,5 +56,31 @@ describe('matchCustomQuickReplies (guard only)', () => {
       matchCustomQuickReplies('mata rathu pata bag eka denna', [whiteBags]),
     ).toEqual([])
     expect(isMostlyColorAsk('mata rathu pata bag eka denna')).toBe(true)
+  })
+})
+
+describe('findAddressRequestQr', () => {
+  it('picks Address Quick Reply and skips shop location', () => {
+    const address: CustomQuickReply = {
+      id: 'a1',
+      title: 'Address Quick Reply',
+      description: 'Request Address format to place an order',
+      kind: 'catalog',
+      content_text: null,
+      catalog_message_id: 'qm_address',
+      product_id: null,
+    }
+    const shop: CustomQuickReply = {
+      id: 's1',
+      title: 'Shop Location Quick Reply',
+      description: 'Shop Location (address, And other contact info included)',
+      kind: 'catalog',
+      content_text: null,
+      catalog_message_id: 'qm_shop',
+      product_id: null,
+    }
+    expect(
+      findAddressRequestQr([deliveryQr, shop, address, whiteBags])?.title,
+    ).toBe('Address Quick Reply')
   })
 })

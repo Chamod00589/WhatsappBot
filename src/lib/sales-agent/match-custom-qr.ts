@@ -61,6 +61,36 @@ export function findCustomQuickReply(
   return null
 }
 
+/**
+ * Find the "Address Quick Reply" card (request address format to place an order).
+ * Excludes shop-location cards that also mention "address".
+ */
+export function findAddressRequestQr(
+  catalog: CustomQuickReply[],
+): CustomQuickReply | null {
+  let best: { qr: CustomQuickReply; score: number } | null = null
+  for (const qr of catalog) {
+    const title = normalizeMatchText(qr.title || '')
+    const desc = normalizeMatchText(qr.description || '')
+    const blob = `${title} ${desc}`
+    if (!blob.includes('address')) continue
+    if (blob.includes('shop location')) continue
+    if (/\bshop\b/.test(title) && /\blocation\b/.test(title)) continue
+
+    let score = 0
+    if (title.includes('address')) score += 4
+    if (desc.includes('request address') || desc.includes('address format')) {
+      score += 5
+    }
+    if (desc.includes('place an order') || desc.includes('order format')) {
+      score += 2
+    }
+    if (score <= 0) continue
+    if (!best || score > best.score) best = { qr, score }
+  }
+  return best?.qr ?? null
+}
+
 export interface CustomMatch {
   qr: CustomQuickReply
   score: number

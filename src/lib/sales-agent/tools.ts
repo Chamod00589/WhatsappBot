@@ -89,7 +89,7 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'generate_quote',
         description:
-          'Send a price quotation (screenshot/card) for the selected bags. Use when the customer asks price / how much / kochchara / quotation, or after find_product when they want a total. Prefer items from the conversation; if items omitted, uses bags already saved in this chat. Skip if identify_product already returned quotation_sent=true this turn.',
+          'Send a price quotation (screenshot/card) for the selected bags. Use when the customer asks price / how much / kochchara / quotation, or after find_product when they want a total. Prefer items from the conversation; if items omitted, uses bags already saved in this chat. Skip if identify_product already returned quotation_sent=true this turn. After the first quote in a chat, the server auto-sends Address Quick Reply once (no address caption on the quote image).',
         parameters: {
           type: 'object',
           properties: {

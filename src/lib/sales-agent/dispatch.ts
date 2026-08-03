@@ -27,6 +27,7 @@ import {
 } from './reply-reference'
 import { markAgentUnableToReply, removeNamedTag } from './tags'
 import { formatAdReferralForAgent, withAdReferralText } from './referral'
+import { hasSentAddressRequestQr } from './address-request-qr'
 
 /**
  * Sales Agent entry — LLM-first architecture.
@@ -339,6 +340,10 @@ export async function dispatchSalesAgentNow(
       }
     }
 
+    const addressQrAlreadySent = await hasSentAddressRequestQr(
+      db,
+      conversationId,
+    )
     const systemExtra = [
       buildSessionStateExtra({
         orderPending: orderPendingForExtra,
@@ -346,6 +351,7 @@ export async function dispatchSalesAgentNow(
         inboundImages: inboundImages.length,
         burstText,
         adReferral: adBlurb,
+        addressQrAlreadySent,
       }),
       replyRefNote,
     ]
@@ -503,9 +509,19 @@ function buildSessionStateExtra(args: {
   inboundImages: number
   burstText: string
   adReferral?: string | null
+  addressQrAlreadySent?: boolean
 }): string {
   const lines: string[] = []
   lines.push(`Inbound image count this turn: ${args.inboundImages}`)
+  if (args.addressQrAlreadySent) {
+    lines.push(
+      'Address Quick Reply already sent this chat — do NOT re-send unless customer asks address format / how to order again.',
+    )
+  } else {
+    lines.push(
+      'Address Quick Reply not sent yet — server will auto-send it once after the first quotation.',
+    )
+  }
   if (args.adReferral?.trim()) {
     lines.push(args.adReferral.trim().slice(0, 900))
   }
