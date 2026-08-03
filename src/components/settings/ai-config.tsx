@@ -69,6 +69,10 @@ export function AiConfig() {
   const [keyEdited, setKeyEdited] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [hasStoredKey, setHasStoredKey] = useState(false);
+  const [geminiKey2, setGeminiKey2] = useState('');
+  const [geminiKey2Edited, setGeminiKey2Edited] = useState(false);
+  const [showGeminiKey2, setShowGeminiKey2] = useState(false);
+  const [hasStoredGeminiKey2, setHasStoredGeminiKey2] = useState(false);
   const [embeddingsKey, setEmbeddingsKey] = useState('');
   const [embeddingsKeyEdited, setEmbeddingsKeyEdited] = useState(false);
   const [hasStoredEmbeddingsKey, setHasStoredEmbeddingsKey] = useState(false);
@@ -125,6 +129,9 @@ export function AiConfig() {
         setHasStoredKey(Boolean(data.has_key));
         setApiKey(data.has_key ? MASKED_KEY : '');
         setKeyEdited(false);
+        setHasStoredGeminiKey2(Boolean(data.has_gemini_key_2));
+        setGeminiKey2(data.has_gemini_key_2 ? MASKED_KEY : '');
+        setGeminiKey2Edited(false);
         setHasStoredEmbeddingsKey(Boolean(data.has_embeddings_key));
         setEmbeddingsKey(data.has_embeddings_key ? MASKED_KEY : '');
         setEmbeddingsKeyEdited(false);
@@ -159,6 +166,8 @@ export function AiConfig() {
   const keyPayload = () => (keyEdited ? apiKey.trim() : undefined);
 
   // undefined = leave unchanged; '' typed = null (clear); text = set.
+  const geminiKey2Payload = () =>
+    geminiKey2Edited ? geminiKey2.trim() || null : undefined;
   const embeddingsKeyPayload = () =>
     embeddingsKeyEdited ? embeddingsKey.trim() || null : undefined;
 
@@ -166,6 +175,9 @@ export function AiConfig() {
     provider,
     model: model.trim(),
     api_key: keyPayload(),
+    ...(provider === 'gemini'
+      ? { gemini_api_key_2: geminiKey2Payload() }
+      : {}),
     embeddings_api_key: embeddingsKeyPayload(),
     system_prompt: systemPrompt.trim() || null,
     is_active: isActive,
@@ -245,6 +257,9 @@ export function AiConfig() {
         setHasStoredKey(false);
         setApiKey('');
         setKeyEdited(false);
+        setHasStoredGeminiKey2(false);
+        setGeminiKey2('');
+        setGeminiKey2Edited(false);
         setIsActive(false);
         setAutoReplyEnabled(false);
         setSystemPrompt('');
@@ -336,15 +351,17 @@ export function AiConfig() {
                   </p>
                 ) : provider === 'gemini' ? (
                   <p className="text-xs text-muted-foreground">
-                    Google AI Studio key. Default model gemini-3.1-flash-lite;
-                    on free-tier quota it falls back to gemini-2.5-flash-lite.
+                    Default model gemini-3.5-flash-lite. Free-tier fallback:
+                    key2/3.5 → key1/3.1 → key2/3.1 (keys stored encrypted in DB).
                   </p>
                 ) : null}
               </div>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="ai-key">{t('apiKey')}</Label>
+              <Label htmlFor="ai-key">
+                {provider === 'gemini' ? 'Gemini API key 1' : t('apiKey')}
+              </Label>
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <Input
@@ -392,6 +409,53 @@ export function AiConfig() {
                 </Button>
               </div>
             </div>
+
+            {provider === 'gemini' && (
+              <div className="space-y-2">
+                <Label htmlFor="ai-gemini-key-2">
+                  Gemini API key 2{' '}
+                  <span className="font-normal text-muted-foreground">
+                    (free-tier rotation)
+                  </span>
+                </Label>
+                <div className="relative">
+                  <Input
+                    id="ai-gemini-key-2"
+                    type={showGeminiKey2 ? 'text' : 'password'}
+                    value={geminiKey2}
+                    onChange={(e) => {
+                      setGeminiKey2(e.target.value);
+                      setGeminiKey2Edited(true);
+                    }}
+                    onFocus={() => {
+                      if (!geminiKey2Edited && hasStoredGeminiKey2) {
+                        setGeminiKey2('');
+                        setGeminiKey2Edited(true);
+                      }
+                    }}
+                    placeholder={KEY_PLACEHOLDER.gemini}
+                    disabled={disabled}
+                    autoComplete="off"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowGeminiKey2((s) => !s)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    tabIndex={-1}
+                  >
+                    {showGeminiKey2 ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Second Google AI Studio project key. Clear the field and save
+                  to remove it. Cascade tries key2 first on 3.5 Flash Lite.
+                </p>
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label htmlFor="ai-embeddings-key">

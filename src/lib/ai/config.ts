@@ -6,6 +6,7 @@ interface AiConfigRow {
   provider: AiConfig['provider']
   model: string
   api_key: string
+  gemini_api_key_2?: string | null
   system_prompt: string | null
   is_active: boolean
   auto_reply_enabled: boolean
@@ -15,6 +16,9 @@ interface AiConfigRow {
 }
 
 const CONFIG_COLUMNS =
+  'provider, model, api_key, gemini_api_key_2, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key'
+
+const CONFIG_COLUMNS_LEGACY =
   'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key'
 
 /**
@@ -34,16 +38,30 @@ export async function loadAiConfig(
   opts: { requireActive?: boolean } = {},
 ): Promise<AiConfig | null> {
   const { requireActive = true } = opts
-  const { data, error } = await db
-    .from('ai_configs')
-    .select(CONFIG_COLUMNS)
-    .eq('account_id', accountId)
-    .maybeSingle()
+  let data: AiConfigRow | null = null
+  {
+    const res = await db
+      .from('ai_configs')
+      .select(CONFIG_COLUMNS)
+      .eq('account_id', accountId)
+      .maybeSingle()
+    if (res.error) {
+      // Pre-migration 048 — column missing.
+      const legacy = await db
+        .from('ai_configs')
+        .select(CONFIG_COLUMNS_LEGACY)
+        .eq('account_id', accountId)
+        .maybeSingle()
+      if (legacy.error) throw legacy.error
+      data = legacy.data as AiConfigRow | null
+    } else {
+      data = res.data as AiConfigRow | null
+    }
+  }
 
-  if (error) throw error
   if (!data) return null
 
-  const row = data as AiConfigRow
+  const row = data
   // The Playground passes requireActive:false so an admin can test the
   // agent before flipping the master switch on.
   if (requireActive && !row.is_active) return null
@@ -69,10 +87,23 @@ export async function loadAiConfig(
     }
   }
 
+  let apiKey2: string | null = null
+  if (row.gemini_api_key_2) {
+    try {
+      apiKey2 = decrypt(row.gemini_api_key_2)
+    } catch {
+      console.error(
+        `[ai config] gemini_api_key_2 for account ${accountId} could not be decrypted — check ENCRYPTION_KEY.`,
+      )
+      apiKey2 = null
+    }
+  }
+
   return {
     provider: row.provider,
     model: row.model,
     apiKey: decrypt(row.api_key),
+    apiKey2,
     systemPrompt: row.system_prompt,
     isActive: row.is_active,
     autoReplyEnabled: row.auto_reply_enabled,

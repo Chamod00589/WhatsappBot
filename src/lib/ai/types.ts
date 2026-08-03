@@ -32,6 +32,11 @@ export interface AiConfig {
   provider: AiProvider
   model: string
   apiKey: string
+  /**
+   * Optional second Google AI Studio key (Gemini only). Used to rotate
+   * free-tier quota across projects. Encrypted as `gemini_api_key_2`.
+   */
+  apiKey2?: string | null
   systemPrompt: string | null
   isActive: boolean
   autoReplyEnabled: boolean

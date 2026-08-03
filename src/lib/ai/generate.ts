@@ -47,7 +47,10 @@ export async function generateReply(args: GenerateArgs): Promise<GenerateResult>
       result = await generateOpenRouter(providerArgs)
       break
     case 'gemini':
-      result = await generateGemini(providerArgs)
+      result = await generateGemini({
+        ...providerArgs,
+        apiKey2: config.apiKey2,
+      })
       break
     default:
       throw new AiError(`Unsupported AI provider: ${config.provider}`, {

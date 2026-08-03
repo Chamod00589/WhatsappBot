@@ -34,7 +34,8 @@ import {
 } from '@/lib/ai/providers/openrouter-routing'
 import {
   GEMINI_OPENAI_URL,
-  geminiFallbackModels,
+  buildGeminiAttempts,
+  shouldRetryGeminiAttempt,
 } from '@/lib/ai/providers/gemini'
 import { AiError } from '@/lib/ai/types'
 import type { MatchableQuickReply } from './match-products'
@@ -253,6 +254,7 @@ async function runOpenAiToolLoop(
   const callModel = async (
     model: string,
     withFallbacks: boolean,
+    apiKeyOverride?: string,
   ): Promise<Response> => {
     const body: Record<string, unknown> = {
       model,
@@ -283,7 +285,7 @@ async function runOpenAiToolLoop(
     return fetch(url, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${config.apiKey}`,
+        Authorization: `Bearer ${apiKeyOverride || config.apiKey}`,
         'Content-Type': 'application/json',
         ...(config.provider === 'openrouter'
           ? {
@@ -297,79 +299,125 @@ async function runOpenAiToolLoop(
     })
   }
 
+  /** Gemini: try key×model cascade to spread free-tier quota. */
+  const callGeminiWithFallback = async (): Promise<{
+    res: Response
+    usedModel: string
+    apiKey: string
+    label: string
+  }> => {
+    const attempts = buildGeminiAttempts({
+      apiKey: config.apiKey,
+      apiKey2: config.apiKey2,
+      preferredModel: config.model,
+    })
+    if (!attempts.length) {
+      throw new AiError('No Gemini API key configured', {
+        code: 'invalid_key',
+        status: 401,
+      })
+    }
+
+    let lastErr: AiError | null = null
+    for (let i = 0; i < attempts.length; i++) {
+      const attempt = attempts[i]
+      if (i > 0) {
+        args.debug?.step(
+          'ai_tools',
+          `Gemini fallback → ${attempt.label}`,
+        )
+      }
+      const res = await callModel(attempt.model, false, attempt.apiKey)
+      if (res.ok) {
+        return {
+          res,
+          usedModel: attempt.model,
+          apiKey: attempt.apiKey,
+          label: attempt.label,
+        }
+      }
+      const err = await providerHttpError('Gemini', res.clone())
+      lastErr = err
+      if (i < attempts.length - 1 && shouldRetryGeminiAttempt(err)) {
+        args.debug?.step(
+          'ai_tools',
+          `${attempt.label} failed (${err.message.slice(0, 120)}) — trying next`,
+        )
+        continue
+      }
+      throw err
+    }
+    throw lastErr || new AiError('Gemini unavailable', { code: 'provider_error' })
+  }
+
+  /** Sticky key for Gemini follow-up rounds (thought_signature continuity). */
+  let stickyGeminiKey: string | undefined
+  let stickyGeminiModel: string | undefined
+
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     args.debug?.step('ai_tools', `Model round ${round + 1}/${MAX_TOOL_ROUNDS}`)
 
     let res: Response
-    let usedModel = config.model
+    let usedModel = stickyGeminiModel || config.model
     try {
-      res = await callModel(config.model, true)
-      if (!res.ok && config.provider === 'openrouter') {
-        const cloned = res.clone()
-        const err = await providerHttpError(config.provider, cloned)
-
-        if (
-          isOpenRouterPrivacyError(err) &&
-          shouldSuggestOpenRouterZdrFallback(config.model)
-        ) {
-          args.debug?.step(
-            'ai_tools',
-            `OpenRouter privacy blocked ${config.model} — retrying ${OPENROUTER_ZDR_FALLBACK_MODEL}`,
-          )
-          usedModel = OPENROUTER_ZDR_FALLBACK_MODEL
-          res = await callModel(OPENROUTER_ZDR_FALLBACK_MODEL, true)
-        } else if (isOpenRouterRateLimitError(err)) {
-          const retries = openRouterClientRetryModels(config.model)
-          let recovered = false
-          for (const next of retries) {
-            args.debug?.step(
-              'ai_tools',
-              `OpenRouter rate/quota on ${usedModel} — retrying ${next}`,
-            )
-            usedModel = next
-            res = await callModel(next, false)
-            if (res.ok) {
-              recovered = true
-              break
-            }
-            const nextErr = await providerHttpError(
-              config.provider,
-              res.clone(),
-            )
-            if (
-              !isOpenRouterRateLimitError(nextErr) &&
-              !isOpenRouterPrivacyError(nextErr)
-            ) {
-              throw nextErr
-            }
-          }
-          if (!recovered && !res.ok) throw err
+      if (config.provider === 'gemini') {
+        // First Gemini round: walk the key×model cascade. Later rounds reuse
+        // the same key+model so thought_signature stays valid.
+        if (!stickyGeminiKey || !stickyGeminiModel) {
+          const picked = await callGeminiWithFallback()
+          res = picked.res
+          usedModel = picked.usedModel
+          stickyGeminiKey = picked.apiKey
+          stickyGeminiModel = picked.usedModel
+          args.debug?.step('ai_tools', `Gemini using ${picked.label}`)
         } else {
-          throw err
+          res = await callModel(stickyGeminiModel, false, stickyGeminiKey)
         }
-      } else if (!res.ok && config.provider === 'gemini') {
-        const cloned = res.clone()
-        const err = await providerHttpError('Gemini', cloned)
-        if (isOpenRouterRateLimitError(err)) {
-          const retries = geminiFallbackModels(config.model)
-          let recovered = false
-          for (const next of retries) {
+      } else {
+        res = await callModel(config.model, true)
+        if (!res.ok && config.provider === 'openrouter') {
+          const cloned = res.clone()
+          const err = await providerHttpError(config.provider, cloned)
+
+          if (
+            isOpenRouterPrivacyError(err) &&
+            shouldSuggestOpenRouterZdrFallback(config.model)
+          ) {
             args.debug?.step(
               'ai_tools',
-              `Gemini rate/quota on ${usedModel} — retrying ${next}`,
+              `OpenRouter privacy blocked ${config.model} — retrying ${OPENROUTER_ZDR_FALLBACK_MODEL}`,
             )
-            usedModel = next
-            res = await callModel(next, false)
-            if (res.ok) {
-              recovered = true
-              break
+            usedModel = OPENROUTER_ZDR_FALLBACK_MODEL
+            res = await callModel(OPENROUTER_ZDR_FALLBACK_MODEL, true)
+          } else if (isOpenRouterRateLimitError(err)) {
+            const retries = openRouterClientRetryModels(config.model)
+            let recovered = false
+            for (const next of retries) {
+              args.debug?.step(
+                'ai_tools',
+                `OpenRouter rate/quota on ${usedModel} — retrying ${next}`,
+              )
+              usedModel = next
+              res = await callModel(next, false)
+              if (res.ok) {
+                recovered = true
+                break
+              }
+              const nextErr = await providerHttpError(
+                config.provider,
+                res.clone(),
+              )
+              if (
+                !isOpenRouterRateLimitError(nextErr) &&
+                !isOpenRouterPrivacyError(nextErr)
+              ) {
+                throw nextErr
+              }
             }
-            const nextErr = await providerHttpError('Gemini', res.clone())
-            if (!isOpenRouterRateLimitError(nextErr)) throw nextErr
+            if (!recovered && !res.ok) throw err
+          } else {
+            throw err
           }
-          if (!recovered && !res.ok) throw err
-        } else {
-          throw err
         }
       }
     } catch (err) {

@@ -30,7 +30,7 @@ export async function GET() {
       // `api_key` is selected only to derive `has_key` — it is stripped
       // out below and never returned to the client.
       .select(
-        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key, sales_agent_enabled, sa_product_match, sa_identify, sa_custom_qr_match, sa_ai_text, sa_create_order, sa_quotation, sa_tracking, sa_edit_order',
+        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, gemini_api_key_2, embeddings_api_key, sales_agent_enabled, sa_product_match, sa_identify, sa_custom_qr_match, sa_ai_text, sa_create_order, sa_quotation, sa_tracking, sa_edit_order',
       )
       .eq('account_id', accountId)
       .maybeSingle()
@@ -56,6 +56,7 @@ export async function GET() {
       return NextResponse.json({
         configured: true,
         has_key: !!api_key,
+        has_gemini_key_2: false,
         has_embeddings_key: !!embeddings_api_key,
         sales_agent_enabled: true,
         sa_product_match: true,
@@ -73,10 +74,16 @@ export async function GET() {
     if (!data) return NextResponse.json({ configured: false })
     // The keys are selected only to derive the has_* flags; neither is
     // returned to the client.
-    const { api_key, embeddings_api_key, ...safe } = data
+    const { api_key, gemini_api_key_2, embeddings_api_key, ...safe } = data as {
+      api_key?: string | null
+      gemini_api_key_2?: string | null
+      embeddings_api_key?: string | null
+      [k: string]: unknown
+    }
     return NextResponse.json({
       configured: true,
       has_key: !!api_key,
+      has_gemini_key_2: !!gemini_api_key_2,
       has_embeddings_key: !!embeddings_api_key,
       ...safe,
     })
@@ -155,6 +162,9 @@ export async function POST(request: Request) {
     }
 
     const rawKey = typeof body.api_key === 'string' ? body.api_key.trim() : ''
+    const rawGeminiKey2 =
+      typeof body.gemini_api_key_2 === 'string' ? body.gemini_api_key_2.trim() : ''
+    const clearGeminiKey2 = body.gemini_api_key_2 === null
 
     // Embeddings key (optional, for semantic KB search): a non-empty
     // string sets/replaces it; an explicit null clears it; absent leaves
@@ -168,7 +178,7 @@ export async function POST(request: Request) {
     // Reuse the stored key when the form didn't send a fresh one.
     const { data: existing } = await supabase
       .from('ai_configs')
-      .select('id, provider, model, api_key')
+      .select('id, provider, model, api_key, gemini_api_key_2')
       .eq('account_id', accountId)
       .maybeSingle()
 
@@ -192,14 +202,22 @@ export async function POST(request: Request) {
     const credentialsChanged =
       !existing ||
       rawKey !== '' ||
+      rawGeminiKey2 !== '' ||
+      clearGeminiKey2 ||
       provider !== existing.provider ||
       model !== existing.model
 
     if (credentialsChanged) {
       try {
+        // Key 1 often can't use 3.5 Flash Lite on free tier — validate it on
+        // 3.1 when the saved model is 3.5. Key 2 is validated separately below.
+        const validateModel =
+          provider === 'gemini' && model.includes('3.5')
+            ? 'gemini-3.1-flash-lite'
+            : model
         await validateAiCredentials({
           provider,
-          model,
+          model: validateModel,
           apiKey: apiKeyPlain,
           systemPrompt,
           isActive,
@@ -217,6 +235,46 @@ export async function POST(request: Request) {
         }
         console.error('[ai/config POST] validation error:', err)
         return bad('Could not validate the API key with the provider.')
+      }
+    }
+
+    // Optional: validate Gemini key 2 when newly entered (prefer 3.5).
+    if (provider === 'gemini' && rawGeminiKey2) {
+      try {
+        await validateAiCredentials({
+          provider: 'gemini',
+          model: 'gemini-3.5-flash-lite',
+          apiKey: rawGeminiKey2,
+          systemPrompt: null,
+          isActive: true,
+          autoReplyEnabled: false,
+          autoReplyMaxPerConversation: 1,
+          handoffAgentId: null,
+          embeddingsApiKey: null,
+        })
+      } catch (err) {
+        // Soft-fallback: key2 may still work on 3.1 even if 3.5 fails.
+        try {
+          await validateAiCredentials({
+            provider: 'gemini',
+            model: 'gemini-3.1-flash-lite',
+            apiKey: rawGeminiKey2,
+            systemPrompt: null,
+            isActive: true,
+            autoReplyEnabled: false,
+            autoReplyMaxPerConversation: 1,
+            handoffAgentId: null,
+            embeddingsApiKey: null,
+          })
+        } catch (err2) {
+          if (err2 instanceof AiError) {
+            return NextResponse.json(
+              { error: `Gemini key 2: ${err2.message}`, code: err2.code },
+              { status: 400 },
+            )
+          }
+          return bad('Could not validate Gemini API key 2 with the provider.')
+        }
       }
     }
 
@@ -262,6 +320,11 @@ export async function POST(request: Request) {
       shared.embeddings_api_key = encrypt(rawEmbeddingsKey)
     } else if (clearEmbeddingsKey) {
       shared.embeddings_api_key = null
+    }
+    if (rawGeminiKey2) {
+      shared.gemini_api_key_2 = encrypt(rawGeminiKey2)
+    } else if (clearGeminiKey2) {
+      shared.gemini_api_key_2 = null
     }
 
     if (existing) {
