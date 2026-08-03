@@ -224,6 +224,25 @@ export type ContentType =
   | 'interactive';
 export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
 
+/**
+ * Click-to-WhatsApp / FB ads referral Meta attaches to the first
+ * inbound message after an ad click. See Cloud API webhook docs
+ * (`messages[].referral`). Migration 046.
+ */
+export interface MessageReferral {
+  source_url?: string;
+  source_type?: string;
+  source_id?: string;
+  headline?: string;
+  body?: string;
+  media_type?: string;
+  image_url?: string;
+  video_url?: string;
+  thumbnail_url?: string;
+  ctwa_clid?: string;
+  welcome_message?: { text?: string; message_id?: string };
+}
+
 export interface Message {
   id: string;
   conversation_id: string;
@@ -263,6 +282,11 @@ export interface Message {
    * the agent feeds this instead of full media/caption payloads.
    */
   ai_context_summary?: string | null;
+  /**
+   * CTWA / FB ads context for the first message after an ad click.
+   * Null for ordinary messages. Migration 046.
+   */
+  referral?: MessageReferral | null;
 }
 
 export type ReactionActor = 'customer' | 'agent';

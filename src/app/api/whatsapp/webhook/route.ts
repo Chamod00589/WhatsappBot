@@ -33,6 +33,20 @@ function supabaseAdmin() {
   return _adminClient
 }
 
+interface WhatsAppReferral {
+  source_url?: string
+  source_type?: string
+  source_id?: string
+  headline?: string
+  body?: string
+  media_type?: string
+  image_url?: string
+  video_url?: string
+  thumbnail_url?: string
+  ctwa_clid?: string
+  welcome_message?: { text?: string; message_id?: string }
+}
+
 interface WhatsAppMessage {
   id: string
   from: string
@@ -59,6 +73,12 @@ interface WhatsAppMessage {
   }
   /** Present when the customer swipe-replies to one of our messages. */
   context?: { id: string }
+  /**
+   * Click-to-WhatsApp / FB ads context. Present on the first inbound
+   * message after a customer taps a CTWA ad. Stored on `messages.referral`
+   * so the inbox can render the ad-info card (migration 046).
+   */
+  referral?: WhatsAppReferral
 }
 
 interface WhatsAppWebhookEntry {
@@ -666,6 +686,13 @@ async function processMessage(
     .eq('sender_type', 'customer')
   const isFirstInboundMessage = (priorCustomerMsgCount ?? 0) === 0
 
+  // CTWA / FB ads referral — only on the first message after an ad
+  // click. Strip empty objects so we don't persist `{}`.
+  const referral =
+    message.referral && Object.keys(message.referral).length > 0
+      ? message.referral
+      : null
+
   const { error: msgError } = await supabaseAdmin().from('messages').insert({
     conversation_id: conversation.id,
     sender_type: 'customer',
@@ -680,6 +707,8 @@ async function processMessage(
     // the column; null for every other content_type so existing inserts
     // behave identically.
     interactive_reply_id: interactiveReplyId,
+    // CTWA ad card context (migration 046). Null for ordinary messages.
+    referral,
   })
 
   if (msgError) {

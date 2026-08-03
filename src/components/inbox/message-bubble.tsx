@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
-import type { Message, MessageReaction } from "@/types";
+import type { Message, MessageReaction, MessageReferral } from "@/types";
 import {
   Clock,
   Check,
@@ -14,6 +14,7 @@ import {
   ImageOff,
   CornerDownLeft,
   Sparkles,
+  ExternalLink,
 } from "lucide-react";
 import { format } from "date-fns";
 import { ReplyQuote } from "./reply-quote";
@@ -139,6 +140,115 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
       onError={() => setError(true)}
     />
   );
+}
+
+function FacebookLogo({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M24 12a12 12 0 1 0-12 12h.21v-9.34H9.63v-3h2.58V9.43c0-2.56 1.57-3.96 3.85-3.96 1.1 0 2.04.08 2.32.12v2.68H16.8c-1.24 0-1.49.59-1.49 1.46v1.9h2.98l-.39 3.01h-2.59v8.89A12 12 0 0 0 24 12Z" />
+    </svg>
+  );
+}
+
+function referralMediaUrl(referral: MessageReferral): string | null {
+  if (referral.media_type === "video") {
+    return referral.thumbnail_url || referral.image_url || null;
+  }
+  return referral.image_url || referral.thumbnail_url || null;
+}
+
+function referralHostname(sourceUrl?: string): string | null {
+  if (!sourceUrl) return null;
+  try {
+    return new URL(sourceUrl).hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * CTWA / FB ads context card — mirrors the ad preview WhatsApp shows
+ * above the customer's first message after an ad click.
+ */
+function AdReferralCard({
+  referral,
+  t,
+}: {
+  referral: MessageReferral;
+  t: ReturnType<typeof useTranslations>;
+}) {
+  const [imgError, setImgError] = useState(false);
+  const mediaUrl = referralMediaUrl(referral);
+  const host = referralHostname(referral.source_url);
+  const hasText = Boolean(referral.headline || referral.body);
+
+  if (!mediaUrl && !hasText && !referral.source_url) return null;
+
+  const card = (
+    <div className="overflow-hidden rounded-lg bg-background/60">
+      {mediaUrl && !imgError && (
+        <div className="relative aspect-square w-full max-w-60 bg-muted">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={mediaUrl}
+            alt=""
+            className="h-full w-full object-cover"
+            onError={() => setImgError(true)}
+          />
+          <span className="absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-[#1877F2] text-white shadow-sm">
+            <FacebookLogo className="h-3.5 w-3.5" />
+          </span>
+        </div>
+      )}
+      {(hasText || host) && (
+        <div className="space-y-0.5 px-2.5 py-2">
+          {referral.headline && (
+            <p className="line-clamp-2 text-xs font-semibold leading-snug">
+              {referral.headline}
+            </p>
+          )}
+          {referral.body && (
+            <p className="line-clamp-4 whitespace-pre-wrap text-[11px] leading-snug text-muted-foreground">
+              {referral.body}
+            </p>
+          )}
+          {host && (
+            <p className="pt-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/80">
+              {host}
+            </p>
+          )}
+        </div>
+      )}
+      {!mediaUrl && !hasText && referral.source_url && (
+        <div className="flex items-center gap-1.5 px-2.5 py-2 text-xs text-muted-foreground">
+          <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+          <span>{t("adReferralOpen")}</span>
+        </div>
+      )}
+    </div>
+  );
+
+  if (referral.source_url) {
+    return (
+      <a
+        href={referral.source_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mb-2 block max-w-60 overflow-hidden rounded-lg ring-1 ring-border/60 transition-opacity hover:opacity-90"
+        title={t("adReferral")}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {card}
+      </a>
+    );
+  }
+
+  return <div className="mb-2 max-w-60">{card}</div>;
 }
 
 function MessageContent({ message, t }: { message: Message, t: ReturnType<typeof useTranslations> }) {
@@ -291,6 +401,10 @@ export function MessageBubble({
 
   const isAgent = message.sender_type === "agent" || message.sender_type === "bot";
   const time = format(new Date(message.created_at), "HH:mm");
+  const referral =
+    message.referral && Object.keys(message.referral).length > 0
+      ? message.referral
+      : null;
 
   // Row alignment + width cap are owned by <MessageActions> so its hover
   // group matches the bubble's content area, not the full row.
@@ -318,6 +432,7 @@ export function MessageBubble({
             onPrimary={isAgent}
           />
         )}
+        {referral && <AdReferralCard referral={referral} t={t} />}
         <MessageContent message={message} t={t} />
         <div
           className={cn(
