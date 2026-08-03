@@ -26,6 +26,7 @@ import {
   resolveReplyReference,
 } from './reply-reference'
 import { markAgentUnableToReply, removeNamedTag } from './tags'
+import { formatAdReferralForAgent, withAdReferralText } from './referral'
 
 /**
  * Sales Agent entry — LLM-first architecture.
@@ -88,6 +89,11 @@ export async function dispatchSalesAgentNow(
     metaMediaId: metaMediaId || null,
     burstLines: (rawInbound || '').split('\n').filter((l) => l.trim()).length,
     firstInbound: Boolean(isFirstInboundMessage),
+    hasAdReferral: Boolean(
+      args.referral &&
+        typeof args.referral === 'object' &&
+        Object.keys(args.referral).length > 0,
+    ),
   })
 
   try {
@@ -189,6 +195,16 @@ export async function dispatchSalesAgentNow(
     }
 
     const inboundText = stripTestMarker(rawInbound || '')
+    const referral =
+      args.referral &&
+      typeof args.referral === 'object' &&
+      Object.keys(args.referral).length > 0
+        ? args.referral
+        : null
+    // Burst text for product matchers + tools includes ad copy so a
+    // generic greeting still resolves to the advertised bag.
+    const burstText = withAdReferralText(inboundText, referral) || inboundText
+    const adBlurb = formatAdReferralForAgent(referral)
 
     if (inboundHasTestMarker(rawInbound || '')) {
       await resetSalesAgentSession(db, conversationId)
@@ -208,7 +224,7 @@ export async function dispatchSalesAgentNow(
 
     // LLM-first requires the model; without aiText there is no decision layer.
     if (!config.aiText) {
-      if (inboundText.trim() || inboundImages.length > 0) {
+      if (inboundText.trim() || inboundImages.length > 0 || adBlurb) {
         await actionMarkHuman({
           db,
           accountId,
@@ -234,7 +250,7 @@ export async function dispatchSalesAgentNow(
       return
     }
 
-    if (!inboundText.trim() && inboundImages.length === 0) {
+    if (!inboundText.trim() && inboundImages.length === 0 && !adBlurb) {
       await log.complete()
       return
     }
@@ -244,7 +260,7 @@ export async function dispatchSalesAgentNow(
       conversationId,
     )
     const replyMode = detectReplyMode(
-      [...customerTexts, inboundText].filter(Boolean),
+      [...customerTexts, burstText].filter(Boolean),
     )
     const useSinglish = replyMode === 'singlish'
     log.set({
@@ -320,7 +336,8 @@ export async function dispatchSalesAgentNow(
         orderPending: orderPendingForExtra,
         identifyPending: gate.conversation.sa_identify_pending,
         inboundImages: inboundImages.length,
-        burstText: inboundText,
+        burstText,
+        adReferral: adBlurb,
       }),
       replyRefNote,
     ]
@@ -329,8 +346,8 @@ export async function dispatchSalesAgentNow(
 
     const loopMessages = messages.length
       ? messages
-      : inboundText
-        ? [{ role: 'user' as const, content: inboundText }]
+      : burstText
+        ? [{ role: 'user' as const, content: burstText }]
         : [{ role: 'user' as const, content: '[customer sent an image]' }]
 
     log.step(
@@ -353,7 +370,7 @@ export async function dispatchSalesAgentNow(
       productCatalog: products,
       customCatalog: customs,
       inboundImages,
-      burstText: inboundText,
+      burstText,
       debug: log,
     })
 
@@ -477,11 +494,15 @@ function buildSessionStateExtra(args: {
   identifyPending: unknown
   inboundImages: number
   burstText: string
+  adReferral?: string | null
 }): string {
   const lines: string[] = []
   lines.push(`Inbound image count this turn: ${args.inboundImages}`)
+  if (args.adReferral?.trim()) {
+    lines.push(args.adReferral.trim().slice(0, 900))
+  }
   if (args.burstText.trim()) {
-    lines.push(`Latest burst text:\n${args.burstText.trim().slice(0, 800)}`)
+    lines.push(`Latest burst text:\n${args.burstText.trim().slice(0, 1200)}`)
   }
 
   const order = parseOrderPending(args.orderPending)

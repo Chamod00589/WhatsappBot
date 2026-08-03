@@ -155,7 +155,7 @@ async function mergeBurstArgs(
 
   let query = db
     .from('messages')
-    .select('content_text, content_type, media_url, created_at')
+    .select('content_text, content_type, media_url, referral, created_at')
     .eq('conversation_id', conversationId)
     .eq('sender_type', 'customer')
     .order('created_at', { ascending: true })
@@ -352,5 +352,23 @@ async function mergeBurstArgs(
     mediaUrl,
     metaMediaId,
     inboundImages,
+    // Prefer a referral from any message in this burst (CTWA first msg).
+    referral: pickBurstReferral(rows ?? [], buf.base.referral),
   }
+}
+
+function pickBurstReferral(
+  rows: Array<{ referral?: unknown }>,
+  fallback?: SalesAgentDispatchArgs['referral'],
+): SalesAgentDispatchArgs['referral'] {
+  for (const r of rows) {
+    const ref = r.referral
+    if (ref && typeof ref === 'object' && Object.keys(ref as object).length > 0) {
+      return ref as NonNullable<SalesAgentDispatchArgs['referral']>
+    }
+  }
+  if (fallback && typeof fallback === 'object' && Object.keys(fallback).length > 0) {
+    return fallback
+  }
+  return null
 }

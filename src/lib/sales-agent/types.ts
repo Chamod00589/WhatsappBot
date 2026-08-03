@@ -1,4 +1,5 @@
 import type { AiConfig } from '@/lib/ai/types'
+import type { MessageReferral } from '@/types'
 
 /** Sales Agent capability flags (stored on ai_configs). */
 export interface SalesAgentCapabilities {
@@ -50,6 +51,8 @@ export interface SalesAgentDispatchArgs {
     /** Caption / nearby text for this image (qty, color, etc.). */
     caption?: string | null
   }>
+  /** CTWA / FB ads referral — agent uses ad copy to identify the product. */
+  referral?: MessageReferral | null
   /** True when this is the contact's first-ever inbound. */
   isFirstInboundMessage?: boolean
   /**

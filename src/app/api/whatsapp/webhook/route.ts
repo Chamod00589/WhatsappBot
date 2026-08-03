@@ -849,6 +849,7 @@ async function processMessage(
             : null,
       isFirstInboundMessage,
       replyToMessageId: replyToInternalId,
+      referral,
     })
   }
 

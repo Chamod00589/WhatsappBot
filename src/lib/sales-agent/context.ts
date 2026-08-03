@@ -1,13 +1,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { ChatMessage } from '@/lib/ai/types'
+import type { MessageReferral } from '@/types'
 import { SALES_AGENT_CONTEXT_LIMIT, TEST_MARKER } from './types'
 import { findTestMarkerCutoff } from './gates'
+import { withAdReferralText } from './referral'
 
 interface DbMessage {
   sender_type: 'customer' | 'agent' | 'bot'
   content_text: string | null
   content_type: string
   ai_context_summary: string | null
+  referral: MessageReferral | null
   created_at: string
 }
 
@@ -16,6 +19,8 @@ interface DbMessage {
  * - Caps at 15 turns (after *** cutoff if present)
  * - Outbound quick replies / system ops use ai_context_summary when set
  * - Customer images become a short placeholder
+ * - CTWA / FB ads referral is merged into customer turns so the agent
+ *   can identify the advertised product from ad copy
  */
 export async function buildSalesAgentContext(
   db: SupabaseClient,
@@ -27,7 +32,7 @@ export async function buildSalesAgentContext(
   let query = db
     .from('messages')
     .select(
-      'sender_type, content_text, content_type, ai_context_summary, created_at',
+      'sender_type, content_text, content_type, ai_context_summary, referral, created_at',
     )
     .eq('conversation_id', conversationId)
     .order('created_at', { ascending: false })
@@ -61,12 +66,16 @@ export async function buildSalesAgentContext(
     if (m.ai_context_summary?.trim()) {
       content = m.ai_context_summary.trim()
     } else if (m.content_type === 'image' && role === 'user') {
-      content = '[customer sent an image]'
-    } else if (m.content_text?.trim()) {
-      content =
-        role === 'user'
+      content = withAdReferralText('[customer sent an image]', m.referral) ||
+        '[customer sent an image]'
+    } else if (m.content_text?.trim() || (role === 'user' && m.referral)) {
+      const rawText = m.content_text?.trim()
+        ? role === 'user'
           ? stripKeepAfterMarker(m.content_text.trim())
           : m.content_text.trim()
+        : ''
+      content =
+        role === 'user' ? withAdReferralText(rawText, m.referral) || null : rawText
     }
 
     if (!content) continue
