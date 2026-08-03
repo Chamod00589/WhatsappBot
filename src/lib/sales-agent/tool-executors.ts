@@ -217,12 +217,16 @@ async function execIdentifyProduct(
       productId: it.productId,
       price: it.price,
     }))
+    const missingColor = saved.filter((s) => !String(s.color || '').trim())
     const quote =
       r.sentQr && savedRaw.length
         ? await maybeAutoQuoteAfterIdentify(ctx, toOrderLineItems(savedRaw))
         : null
     const quoteNote = quote?.ok
       ? `; sent quotation for ${saved.length} line(s)`
+      : ''
+    const colorHint = missingColor.length
+      ? ` Color unknown for: ${missingColor.map((s) => s.name).join(', ')} — ask_missing_information for color before create_order (do not invent a color).`
       : ''
     return {
       replied: r.handled || Boolean(quote?.ok),
@@ -238,9 +242,10 @@ async function execIdentifyProduct(
         qrCount: r.qrCount,
         saved_items: saved,
         quotation_sent: Boolean(quote?.ok),
+        color_unknown: missingColor.map((s) => s.name),
         next: quote?.ok
-          ? 'Quotation already sent after product cards — do NOT call generate_quote again this turn. Use saved_items for create_order later.'
-          : 'Use saved_items colors/qty for generate_quote / create_order. Call find_product only for bags not already in saved_items.',
+          ? `Quotation already sent after product cards — do NOT call generate_quote again this turn. Use saved_items for create_order later.${colorHint}`
+          : `Use saved_items colors/qty for generate_quote / create_order. Call find_product only for bags not already in saved_items.${colorHint}`,
       },
     }
   }
@@ -249,6 +254,7 @@ async function execIdentifyProduct(
   const matches: Array<{
     product: string
     color: string
+    colorKnown: boolean
     confidence: number
     catalog_message_id: string | null
     quick_reply_id: string | null
@@ -264,10 +270,12 @@ async function execIdentifyProduct(
       })
       const best = found[0]
       if (!best) continue
+      const color = (best.color || '').trim()
       const qr = matchProductByIdentifyName(best.product, ctx.productCatalog)
       matches.push({
         product: best.product,
-        color: best.color,
+        color,
+        colorKnown: Boolean(color),
         confidence: best.confidence,
         catalog_message_id: qr?.catalog_message_id ?? null,
         quick_reply_id: qr?.id ?? null,
@@ -276,6 +284,8 @@ async function execIdentifyProduct(
       console.error('[sales-agent] identify_product failed:', err)
     }
   }
+
+  const unknown = matches.filter((m) => !m.colorKnown).map((m) => m.product)
 
   return {
     replied: false,
@@ -288,6 +298,10 @@ async function execIdentifyProduct(
       highConfidence: matches.filter(
         (m) => m.confidence >= IDENTIFY_CONFIDENCE_THRESHOLD,
       ),
+      color_unknown: unknown,
+      next: unknown.length
+        ? `Color unknown for: ${unknown.join(', ')} — ask which color; never invent one.`
+        : undefined,
     },
   }
 }

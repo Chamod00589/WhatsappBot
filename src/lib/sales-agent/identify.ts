@@ -20,7 +20,11 @@ import {
   type MatchableQuickReply,
 } from './match-products'
 import { sendQuickReplyByCatalogId } from './send-quick-reply'
-import { identifyRejectText, identifyConfirmAskText } from './identify-text'
+import {
+  identifyRejectText,
+  identifyConfirmAskText,
+  identifyAskColorText,
+} from './identify-text'
 import {
   assignQtysToImageLines,
   extractColorsFromText,
@@ -162,7 +166,13 @@ export async function handleInboundIdentifyMany(args: {
   handled: boolean
   sentQr: boolean
   qrCount: number
-  identified: Array<{ product: string; color: string; confidence: number }>
+  identified: Array<{
+    product: string
+    color: string
+    confidence: number
+    /** False when match came from a product-only / multi-color catalog shot. */
+    colorKnown: boolean
+  }>
   /** Bags saved into chat memory after identify + burst named lines. */
   savedItems?: OrderPendingQuotedItem[]
 }> {
@@ -186,10 +196,12 @@ export async function handleInboundIdentifyMany(args: {
     product: string
     color: string
     confidence: number
+    colorKnown: boolean
   }> = []
   const quotedItems: OrderPendingQuotedItem[] = []
   const imageCaptions: string[] = []
   const sentCatalogIds = new Set<string>()
+  const needColorAsk: string[] = []
   let qrCount = 0
   const needsConfirm: Array<{
     product: string
@@ -217,16 +229,22 @@ export async function handleInboundIdentifyMany(args: {
     if (!best) continue
 
     const caption = (img.caption || '').trim()
-    let color = best.color
+    // ImageIdentify may return Pink__2 / _1; identifyBag already normalizes.
+    let color = (best.color || '').trim()
+    let colorKnown = Boolean(color)
     if (caption) {
       const cols = extractColorsFromText(caption)
-      if (cols.length) color = cols[0]
+      if (cols.length) {
+        color = cols[0]
+        colorKnown = true
+      }
     }
 
     identified.push({
       product: best.product,
       color,
       confidence: best.confidence,
+      colorKnown,
     })
 
     const qr = matchProductByIdentifyName(best.product, catalog)
@@ -238,12 +256,13 @@ export async function handleInboundIdentifyMany(args: {
       if (sentCatalogIds.has(qr.catalog_message_id)) continue
       sentCatalogIds.add(qr.catalog_message_id)
       try {
+        const colorPart = colorKnown && color ? ` (${color})` : ' (color unknown)'
         await sendQuickReplyByCatalogId({
           db,
           accountId,
           conversationId,
           catalogMessageId: qr.catalog_message_id,
-          contextSummary: `Sent product quick reply for ${best.product} (${color}) after image identify ${best.confidence.toFixed(0)}%`,
+          contextSummary: `Sent product quick reply for ${best.product}${colorPart} after image identify ${best.confidence.toFixed(0)}%`,
         })
         qrCount += 1
         const line = await buildQuotedItemFromIdentify(
@@ -254,6 +273,9 @@ export async function handleInboundIdentifyMany(args: {
         if (line) {
           quotedItems.push(line)
           imageCaptions.push(caption)
+        }
+        if (!colorKnown) {
+          needColorAsk.push(best.product)
         }
       } catch (err) {
         console.error('[sales-agent] identify QR send failed:', err)
@@ -305,6 +327,22 @@ export async function handleInboundIdentifyMany(args: {
         }
       } catch (err) {
         console.warn('[sales-agent] merge burst named bags failed:', err)
+      }
+    }
+
+    // Product matched from multi-color / _N catalog shot — ask which color.
+    for (const productName of [...new Set(needColorAsk)]) {
+      try {
+        await engineSendText({
+          accountId,
+          userId: configOwnerUserId,
+          conversationId,
+          contactId,
+          text: identifyAskColorText(productName, useSinglish),
+          aiGenerated: true,
+        })
+      } catch (err) {
+        console.warn('[sales-agent] identify ask-color failed:', err)
       }
     }
 

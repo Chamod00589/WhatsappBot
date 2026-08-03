@@ -6,7 +6,18 @@ export function catalogImageForColor(
   product: CatalogProduct,
   color: string,
 ): string {
-  const ci = product.colors.indexOf(color)
+  const want = (color || '').trim().toLowerCase()
+  let ci = want
+    ? product.colors.findIndex((c) => c.trim().toLowerCase() === want)
+    : -1
+  // Same-color variants from ImageIdentify (Pink__2) already normalized upstream;
+  // still try prefix match if an exact slot is missing.
+  if (ci < 0 && want) {
+    ci = product.colors.findIndex((c) => {
+      const n = c.trim().toLowerCase()
+      return n === want || want.startsWith(`${n}__`) || n.startsWith(want)
+    })
+  }
   const idx =
     ci < 0
       ? 0

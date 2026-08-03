@@ -37,7 +37,7 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'identify_product',
         description:
-          'Identify bag(s) in the customer inbound image(s) via vision matching. Call when the customer sent a photo of a bag. Returns matches (product, color, confidence). Set send_product_card=true to also send the matching product quick-reply card when confidence is high. When cards are sent successfully, the server also auto-sends a price quotation for those bags (quotation_sent=true) — do not call generate_quote again in that case.',
+          'Identify bag(s) in the customer inbound image(s) via CLIP catalog matching. Catalog supports same-color variants (Pink.webp + Pink__2.webp) and product-only shots (_1.webp). Returns product, color (empty if unknown), confidence. If color is empty / color_unknown is set, ask which color — never invent one. Set send_product_card=true to send the product quick-reply when confidence is high. When cards are sent successfully, the server may auto-send a quotation (quotation_sent=true) — do not call generate_quote again in that case.',
         parameters: {
           type: 'object',
           properties: {
