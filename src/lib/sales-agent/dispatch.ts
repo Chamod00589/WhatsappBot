@@ -16,11 +16,14 @@ import { buildSalesAgentContext } from './context'
 import { detectReplyMode } from './language'
 import { parseIdentifyPending } from './identify'
 import { parseOrderPending } from './order-intent'
-import { actionMarkHuman } from './actions/orders'
+import { actionMarkHuman, isAddressLikeMessage } from './actions/orders'
 import { runSalesAgentToolLoop } from './tool-loop'
 import { loadAgentCatalogs } from './tool-executors'
+import { extractCartIntent } from './cart-intent-extract'
+import { runCartPipeline } from './cart-pipeline'
 import { SalesAgentRunLogger } from './debug-log'
 import { rememberAnsweredQuestion } from './dedupe'
+import type { AiUsage } from '@/lib/ai/types'
 import {
   applyReplyReferenceToPending,
   resolveReplyReference,
@@ -30,7 +33,7 @@ import { formatAdReferralForAgent, withAdReferralText } from './referral'
 import { hasSentAddressRequestQr } from './address-request-qr'
 
 /**
- * Sales Agent entry — LLM-first architecture.
+ * Sales Agent entry — extract→validate→quote for carts; tool loop for FAQ/identify.
  *
  * Guardrails only before the model: AI off, Human tag, assigned agent,
  * pause, reply cap, rate limit, conflicting automations.
@@ -344,7 +347,7 @@ export async function dispatchSalesAgentNow(
       db,
       conversationId,
     )
-    const systemExtra = [
+    let systemExtra = [
       buildSessionStateExtra({
         orderPending: orderPendingForExtra,
         identifyPending: gate.conversation.sa_identify_pending,
@@ -364,9 +367,127 @@ export async function dispatchSalesAgentNow(
         ? [{ role: 'user' as const, content: burstText }]
         : [{ role: 'user' as const, content: '[customer sent an image]' }]
 
+    // Extract → validate → quote pipeline (LLM extracts JSON only; server owns cart).
+    let cartHandled = false
+    let extractUsage: AiUsage | null = null
+    if (
+      (config.quotation || config.editOrder) &&
+      burstText.trim() &&
+      config.aiText
+    ) {
+      try {
+        log.step('cart_extract', 'Extracting cart intent (JSON only)')
+        const extracted = await extractCartIntent({
+          config,
+          messages: loopMessages,
+          burstText,
+          sessionExtra: systemExtra,
+        })
+        extractUsage = extracted.usage
+        log.step(
+          'cart_extract',
+          `intent=${extracted.extraction.intent} op=${extracted.extraction.operation || 'null'} items=${extracted.extraction.items.length}`,
+          extracted.extraction,
+        )
+
+        if (
+          extracted.extraction.intent === 'quotation' ||
+          extracted.extraction.intent === 'edit_cart'
+        ) {
+          const pipe = await runCartPipeline({
+            db,
+            accountId,
+            conversationId,
+            contactId,
+            configOwnerUserId,
+            contactPhone,
+            extraction: extracted.extraction,
+            productCatalog: products,
+            useSinglish,
+            replyMode,
+            quotationEnabled: Boolean(config.quotation),
+            editOrderEnabled: Boolean(config.editOrder),
+          })
+          cartHandled = pipe.handled
+          log.step(
+            'cart_pipeline',
+            pipe.message,
+            {
+              handled: pipe.handled,
+              quoted: pipe.quoted,
+              clarified: pipe.clarified,
+              updated: pipe.updated,
+              clarifyReason: pipe.clarifyReason,
+            },
+          )
+          if (pipe.handled) {
+            systemExtra = [
+              systemExtra,
+              `Cart pipeline already handled this turn: quoted=${pipe.quoted} clarified=${pipe.clarified} updated=${pipe.updated}. Do not invent products/prices. Continue only for FAQ, identify images, address→create_order, tracking, or handoff.`,
+            ]
+              .filter(Boolean)
+              .join('\n\n')
+
+            // Refresh pending for session after cart update
+            const { data: convAfterCart } = await db
+              .from('conversations')
+              .select('sa_order_pending')
+              .eq('id', conversationId)
+              .maybeSingle()
+            orderPendingForExtra =
+              convAfterCart?.sa_order_pending ?? orderPendingForExtra
+          }
+        }
+      } catch (err) {
+        console.warn('[sales-agent] cart pipeline failed:', err)
+        log.step(
+          'cart_pipeline',
+          `Cart pipeline error: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
+    // If cart clarified/quoted and there is no image / no other work needed,
+    // still allow tool loop for address/FAQ/identify — but skip when image-less
+    // and cart already replied unless the burst looks like an address.
+    const likelyAddress = isAddressLikeMessage(burstText)
+    const skipToolLoop =
+      cartHandled &&
+      inboundImages.length === 0 &&
+      !likelyAddress &&
+      !adBlurb
+
+    if (skipToolLoop) {
+      log.step(
+        'ai_tools',
+        'Skipped tool loop — cart pipeline already replied (no images/address)',
+      )
+      if (extractUsage) {
+        void logAiUsage(db, {
+          accountId,
+          conversationId,
+          mode: 'auto_reply',
+          provider: config.provider,
+          model: config.model,
+          usage: extractUsage,
+        })
+      }
+      if (inboundText) {
+        await rememberAnsweredQuestion(db, conversationId, inboundText)
+      }
+      await claimSlot(db, conversationId, config.autoReplyMaxPerConversation)
+      try {
+        await removeNamedTag(db, accountId, contactId, 'Unread')
+      } catch {
+        /* ignore */
+      }
+      await log.complete()
+      return
+    }
+
     log.step(
       'ai_tools',
-      `LLM decision maker ${config.provider}/${config.model} — ${loopMessages.length} msgs, ${products.length} products, ${customs.length} FAQ QRs, ${inboundImages.length} image(s)`,
+      `LLM FAQ/identify layer ${config.provider}/${config.model} — ${loopMessages.length} msgs, ${products.length} products, ${customs.length} FAQ QRs, ${inboundImages.length} image(s)`,
     )
 
     const result = await runSalesAgentToolLoop({
@@ -388,25 +509,29 @@ export async function dispatchSalesAgentNow(
       debug: log,
     })
 
+    // Prefer tool-loop usage; fall back to extract usage.
+    const usage = result.usage || extractUsage
+
     log.set({
       reply: {
-        replied: result.replied,
+        replied: result.replied || cartHandled,
         handoff: result.handoff,
         text: result.replyText?.slice(0, 500),
       },
-      usage: result.usage,
+      usage,
     })
     log.step(
       'ai_result',
       result.handoff
         ? 'Model requested handoff / could not complete'
-        : result.replied
-          ? 'Agent tools handled the turn'
+        : result.replied || cartHandled
+          ? 'Agent handled the turn'
           : 'Agent produced no reply',
       {
-        replied: result.replied,
+        replied: result.replied || cartHandled,
         handoff: result.handoff,
-        usage: result.usage,
+        cartHandled,
+        usage,
       },
     )
 
@@ -416,10 +541,10 @@ export async function dispatchSalesAgentNow(
       mode: 'auto_reply',
       provider: config.provider,
       model: config.model,
-      usage: result.usage,
+      usage,
     })
 
-    if (result.handoff || !result.replied) {
+    if (result.handoff || (!result.replied && !cartHandled)) {
       const summary = buildHandoffSummary({
         messages: loopMessages,
         replyCount: gate.conversation.ai_reply_count ?? 0,
@@ -463,7 +588,7 @@ export async function dispatchSalesAgentNow(
       return
     }
 
-    if (result.replied) {
+    if (result.replied || cartHandled) {
       if (inboundText) {
         await rememberAnsweredQuestion(db, conversationId, inboundText)
       }

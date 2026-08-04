@@ -46,6 +46,7 @@ import {
   findRecentOrderForPhone,
   isAddToOrderRequest,
 } from './order-edit-intent'
+import { tryDeterministicQuote } from './cart-pipeline'
 import { sendLocalTextQuickReply, sendQuickReplyByCatalogId } from './send-quick-reply'
 import { IDENTIFY_CONFIDENCE_THRESHOLD } from './types'
 import type { ReplyMode } from './language'
@@ -100,15 +101,22 @@ export async function executeAgentTool(
     case 'identify_product':
       return execIdentifyProduct(ctx, a)
     case 'find_product':
-      return execFindProduct(ctx, a)
     case 'generate_quote':
     case 'send_quotation':
-      return execGenerateQuote(ctx, a)
-    case 'create_order':
-      return execCreateOrder(ctx, a)
     case 'update_order':
     case 'edit_order':
-      return execUpdateOrder(ctx, a)
+      return {
+        replied: false,
+        handoff: false,
+        note: 'cart/quote tools disabled — server extract→validate→quote pipeline owns products and prices',
+        resultPayload: {
+          ok: false,
+          pipeline: 'cart',
+          hint: 'Quotation and cart edits are handled by the server pipeline, not tools.',
+        },
+      }
+    case 'create_order':
+      return execCreateOrder(ctx, a)
     case 'answer_delivery':
       return execAnswerCustomQr(ctx, a, 'delivery')
     case 'answer_policy':
@@ -456,7 +464,7 @@ async function execGenerateQuote(
   }
 }
 
-/** After product cards from identify, send price quotation for saved lines. */
+/** After product cards from identify, send price quotation only when complete. */
 async function maybeAutoQuoteAfterIdentify(
   ctx: ToolExecContext,
   items: OrderLineItem[],
@@ -464,13 +472,14 @@ async function maybeAutoQuoteAfterIdentify(
   if (!ctx.quotationEnabled || ctx.quoteSentThisTurn || !items.length) {
     return null
   }
-  const r = await actionSendQuotation({
+  const r = await tryDeterministicQuote({
     db: ctx.db,
     accountId: ctx.accountId,
     conversationId: ctx.conversationId,
     contactId: ctx.contactId,
     configOwnerUserId: ctx.configOwnerUserId,
     items,
+    productCatalog: ctx.productCatalog,
     useSinglish: ctx.useSinglish,
   })
   if (r.ok) ctx.quoteSentThisTurn = true
@@ -492,15 +501,13 @@ async function execCreateOrder(
     }
   }
 
-  let items = await resolveItemsArg(ctx, a.items)
-  if (!items.length) {
-    items = await loadPendingItems(ctx)
-  }
+  // Items come ONLY from sa_order_pending — ignore any LLM-supplied items.
+  const items = await loadPendingItems(ctx)
   if (!items.length) {
     return {
       replied: false,
       handoff: false,
-      note: 'no bag/color for order — ask which bag and color',
+      note: 'no bag/color for order — ask which bag and color (or send a quotation first)',
       resultPayload: { ok: false, need: 'bag_or_color' },
     }
   }

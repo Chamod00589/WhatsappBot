@@ -129,6 +129,8 @@ export interface CatalogProduct {
   colors: string[]
   images: string[]
   description?: string
+  /** Curated + derived match needles from ladiesbags admin. */
+  aliases?: string[]
 }
 
 export function resolveCatalogImageUrl(url: string, siteBase = catalogBaseUrl()): string {
@@ -147,12 +149,15 @@ export async function fetchCatalogProducts(base = catalogBaseUrl()): Promise<Cat
   const data = await res.json()
   if (!Array.isArray(data)) throw new Error('Catalog response was not a product list')
   return data
-    .map((raw: unknown) => {
+    .map((raw: unknown): CatalogProduct | null => {
       if (!raw || typeof raw !== 'object') return null
       const p = raw as Record<string, unknown>
       const id = typeof p.id === 'string' ? p.id : ''
       const name = typeof p.name === 'string' ? p.name : ''
       if (!id || !name) return null
+      const aliases = Array.isArray(p.aliases)
+        ? p.aliases.filter((a): a is string => typeof a === 'string' && !!a.trim())
+        : []
       return {
         id,
         name,
@@ -163,7 +168,8 @@ export async function fetchCatalogProducts(base = catalogBaseUrl()): Promise<Cat
         images: Array.isArray(p.images)
           ? p.images.filter((u): u is string => typeof u === 'string' && !!u.trim())
           : [],
-      } satisfies CatalogProduct
+        ...(aliases.length ? { aliases } : {}),
+      }
     })
     .filter((p): p is CatalogProduct => p != null)
 }

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
   fetchCatalogProducts,
+  fetchCatalogQuickMessages,
   type CatalogProduct,
 } from '@/lib/catalog/products'
 import { normalizeMatchText } from './normalize'
@@ -14,6 +15,8 @@ export interface MatchableQuickReply {
   catalog_message_id: string | null
   /** Derived search needles (normalized). */
   needles: string[]
+  /** Curated aliases from ladiesbags product admin (raw strings). */
+  matchAliases?: string[]
   /** From ladiesbags.lk admin products (retail catalog). */
   bagName?: string | null
   retailPrice?: number | null
@@ -82,16 +85,20 @@ export async function loadProductQuickReplies(
 }
 
 /**
- * Attach bag name / retail price / colors from ladiesbags.lk `/api/products`
- * (same source as https://www.ladiesbags.lk/admin products).
+ * Attach bag name / retail price / colors / curated aliases from ladiesbags.lk
+ * `/api/products` and `/api/quick-messages` (same source as admin products).
  */
 export async function enrichProductsWithCatalogDetails(
   products: MatchableQuickReply[],
 ): Promise<MatchableQuickReply[]> {
   if (!products.length) return products
   let catalog: CatalogProduct[] = []
+  let quickMsgs: Awaited<ReturnType<typeof fetchCatalogQuickMessages>> = []
   try {
-    catalog = await fetchCatalogProducts()
+    ;[catalog, quickMsgs] = await Promise.all([
+      fetchCatalogProducts(),
+      fetchCatalogQuickMessages(undefined, { lite: true }).catch(() => []),
+    ])
   } catch (err) {
     console.warn(
       '[sales-agent] catalog products fetch failed — agent list without prices/colors:',
@@ -99,11 +106,19 @@ export async function enrichProductsWithCatalogDetails(
     )
     return products
   }
-  if (!catalog.length) return products
+  if (!catalog.length && !quickMsgs.length) return products
 
   const byId = new Map(catalog.map((p) => [p.id, p]))
   const byName = new Map(
     catalog.map((p) => [normalizeMatchText(p.name), p] as const),
+  )
+  const aliasesByCatalogId = new Map(
+    quickMsgs.map((m) => [m.id, m.matchAliases ?? []] as const),
+  )
+  const aliasesByProductId = new Map(
+    quickMsgs
+      .filter((m) => m.productId)
+      .map((m) => [m.productId as string, m.matchAliases ?? []] as const),
   )
 
   return products.map((qr) => {
@@ -117,10 +132,25 @@ export async function enrichProductsWithCatalogDetails(
         const tn = normalizeMatchText(titleName)
         return pn.includes(tn) || tn.includes(pn)
       })
+
+    const exportAliases =
+      (qr.catalog_message_id
+        ? aliasesByCatalogId.get(qr.catalog_message_id)
+        : undefined) ||
+      (qr.product_id ? aliasesByProductId.get(qr.product_id) : undefined) ||
+      []
+    const curated = [
+      ...exportAliases,
+      ...(fromName?.aliases ?? []),
+      ...(qr.matchAliases ?? []),
+    ]
+
     if (!fromName) {
       return {
         ...qr,
         bagName: titleName || qr.title,
+        matchAliases: curated.length ? curated : qr.matchAliases,
+        needles: buildProductNeedles(qr.title, qr.product_id, curated),
       }
     }
     return {
@@ -128,7 +158,8 @@ export async function enrichProductsWithCatalogDetails(
       bagName: fromName.name,
       retailPrice: fromName.price,
       colors: fromName.colors,
-      needles: buildProductNeedles(fromName.name, fromName.id, qr.needles),
+      matchAliases: curated,
+      needles: buildProductNeedles(fromName.name, fromName.id, curated),
     }
   })
 }
