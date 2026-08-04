@@ -66,6 +66,24 @@ describe('order-intent', () => {
     expect(fixed[1].color).toBe('red')
   })
 
+  it('keeps explicit add color when pending has another color for same bag', () => {
+    const fixed = applyPendingOverridesToItems(
+      [{ name: 'Cloudy Shoulder Bag', color: 'Black', qty: 2, price: 2500 }],
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: 'White',
+          qty: 1,
+          price: 2500,
+        },
+      ],
+      { preserveExplicitColor: true },
+    )
+    expect(fixed[0].color).toBe('Black')
+    expect(fixed[0].qty).toBe(2)
+  })
+
   it('uses per-message qty when multiple bags mentioned separately', () => {
     const bloom: MatchableQuickReply = {
       id: '2',

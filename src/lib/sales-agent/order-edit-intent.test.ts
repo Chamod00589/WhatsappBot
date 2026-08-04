@@ -126,10 +126,40 @@ describe('order-edit-intent', () => {
     expect(merged.find((i) => i.name.includes('Cloudy'))?.qty).toBe(2)
     expect(merged.find((i) => i.name.includes('Mini'))?.color).toBe('White')
   })
+
+  it('keeps White and adds Black as separate quotation lines', () => {
+    const merged = mergePendingItemsAdd(
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: 'White',
+          qty: 1,
+          price: 2500,
+        },
+      ],
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: 'Black',
+          qty: 2,
+          price: 2500,
+        },
+      ],
+    )
+    expect(merged).toHaveLength(2)
+    expect(merged.find((i) => i.color === 'White')?.qty).toBe(1)
+    expect(merged.find((i) => i.color === 'Black')?.qty).toBe(2)
+  })
+
+  it('detects dekakuth as add-to-order', () => {
+    expect(isAddToOrderRequest('Mata me color bag dekakuth denna')).toBe(true)
+  })
 })
 
 describe('requested items memory', () => {
-  it('merges qty/color updates without dropping the bag', () => {
+  it('keeps separate colors when merging pending bags', () => {
     const merged = mergeRequestedItems(
       [
         {
@@ -150,9 +180,33 @@ describe('requested items memory', () => {
         },
       ],
     )
+    expect(merged).toHaveLength(2)
+    expect(merged.map((i) => i.color).sort()).toEqual(['Black', 'Red'])
+  })
+
+  it('colorless find_product touch keeps prior color', () => {
+    const merged = mergeRequestedItems(
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: 'White',
+          qty: 1,
+          price: 2500,
+        },
+      ],
+      [
+        {
+          productId: 'cloudy',
+          name: 'Cloudy Shoulder Bag',
+          color: '',
+          qty: 1,
+          price: 2500,
+        },
+      ],
+    )
     expect(merged).toHaveLength(1)
-    expect(merged[0].color).toBe('Red')
-    expect(merged[0].qty).toBe(2)
+    expect(merged[0].color).toBe('White')
   })
 
   it('patches color and keeps qty', () => {

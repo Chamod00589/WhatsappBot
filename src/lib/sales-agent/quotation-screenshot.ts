@@ -86,6 +86,17 @@ export async function enrichQuotationLineItems(
   return out
 }
 
+/** Caption under every quotation image: total including shipping. */
+export function buildQuotationTotalCaption(items: OrderLineItem[]): string {
+  const subtotal = items.reduce(
+    (sum, it) =>
+      sum + (Number(it.price) || 0) * Math.max(1, Number(it.qty) || 1),
+    0,
+  )
+  const grand = subtotal + QUOTATION_SHIPPING_LKR
+  return `Total price = ${formatQuotationMoneyTm(grand)}`
+}
+
 /**
  * Render QuotationCard matching Tampermonkey `renderQuotationCard`
  * (#qm-quotation-card): title, item rows with thumbs, Items/Shipping/Total.
@@ -212,6 +223,8 @@ export async function sendQuotationScreenshot(args: {
   if (!items.length) throw new Error('No quotation items')
 
   const jpeg = await renderQuotationCardPng(items)
+  const captionText =
+    (caption && caption.trim()) || buildQuotationTotalCaption(items)
   const debug = await sendGeneratedCardImage({
     db,
     accountId,
@@ -221,7 +234,7 @@ export async function sendQuotationScreenshot(args: {
     bytes: jpeg,
     filename: `quotation-${Date.now()}.jpg`,
     mimeType: 'image/jpeg',
-    caption,
+    caption: captionText,
     contextSummary: CONTEXT_BLURBS.quotation,
   })
 

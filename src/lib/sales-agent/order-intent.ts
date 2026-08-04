@@ -443,30 +443,63 @@ export function looksLikeNamedProductLine(text: string): boolean {
 /**
  * Prefer conversation-saved quotation/identify colors (and qty/price) when
  * the model invents a different color for the same bag.
+ *
+ * When `preserveExplicitColor` is true (update_order mode=add), an explicit
+ * incoming color is kept even if pending has another color for that bag —
+ * so White x1 + add Black x2 becomes two lines, not three of one color.
  */
 export function applyPendingOverridesToItems(
   items: OrderLineItem[],
   pending: OrderPendingQuotedItem[],
+  opts?: { preserveExplicitColor?: boolean },
 ): OrderLineItem[] {
   if (!items.length || !pending.length) return items
+  const preserve = opts?.preserveExplicitColor === true
   return items.map((it) => {
     const name = normalizeMatchText(it.name)
-    const match = pending.find((p) => {
+    const incomingColor = String(it.color || '').trim()
+    const incomingNorm = normalizeMatchText(incomingColor)
+
+    // Prefer same product+color pending line; else same product.
+    const sameProduct = (p: OrderPendingQuotedItem) => {
       const pn = normalizeMatchText(p.name)
       return (
         pn === name ||
         pn.includes(name) ||
         name.includes(pn) ||
-        (it.productId && p.productId && it.productId === p.productId)
+        Boolean(it.productId && p.productId && it.productId === p.productId)
       )
-    })
+    }
+    const match =
+      (incomingNorm
+        ? pending.find(
+            (p) =>
+              sameProduct(p) &&
+              normalizeMatchText(p.color || '') === incomingNorm,
+          )
+        : undefined) || pending.find(sameProduct)
+
     if (!match) return it
     const pendingColor = String(match.color || '').trim()
+
+    let color = incomingColor
+    if (!incomingColor && pendingColor) {
+      color = pendingColor
+    } else if (incomingColor && pendingColor && !preserve) {
+      // create_order / quote: trust saved identify/quote color over model guess
+      color = pendingColor
+    } else if (incomingColor) {
+      color = incomingColor
+    } else {
+      color = pendingColor || ''
+    }
+
     return {
       ...it,
       productId: it.productId || match.productId,
       name: match.name || it.name,
-      color: pendingColor || it.color || '',
+      color,
+      // Keep explicit qty on add lines; only fall back when missing/invalid
       qty: it.qty >= 1 ? it.qty : match.qty || 1,
       price: it.price > 0 ? it.price : match.price || 0,
       image: it.image || match.image,
@@ -809,19 +842,23 @@ export function shouldRunOrderIntake(inboundText: string): boolean {
   return isAddressLikeMessage(inboundText)
 }
 
-/** Stable key so the same bag upserts instead of duplicating in memory. */
+/** Stable key: same bag + same color upserts; different colors stay separate. */
 export function requestedItemKey(item: {
   productId?: string | null
   name: string
+  color?: string | null
 }): string {
-  if (item.productId) return `id:${item.productId}`
-  return `name:${normalizeMatchText(item.name)}`
+  const color = normalizeMatchText(item.color || '') || '_'
+  if (item.productId) return `id:${item.productId}|c:${color}`
+  return `name:${normalizeMatchText(item.name)}|c:${color}`
 }
 
 /**
- * Merge conversation-scoped requested bags. Incoming lines upsert by
- * product id / name; empty color on incoming keeps the previous color;
- * qty/price/image prefer newer non-empty values.
+ * Merge conversation-scoped requested bags.
+ * - Same product+color → qty summed / fields refreshed
+ * - Different color → separate line (White + Black both kept)
+ * - Incoming empty color with existing colored line(s) for that product →
+ *   keep prior color(s); do not insert a blank-color duplicate
  */
 export function mergeRequestedItems(
   existing: OrderPendingQuotedItem[],
@@ -834,13 +871,43 @@ export function mergeRequestedItems(
   }
   for (const it of incoming) {
     if (!it?.name) continue
+    const incomingColor = String(it.color || '').trim()
+
+    // Colorless upsert: refresh matching product line(s) without inventing
+    // a blank-color row (would later default to catalog black on quote).
+    if (!incomingColor) {
+      const productKey = it.productId
+        ? `id:${it.productId}`
+        : `name:${normalizeMatchText(it.name)}`
+      const siblings = [...map.entries()].filter(([k]) =>
+        k.startsWith(`${productKey}|c:`),
+      )
+      if (siblings.length === 1) {
+        const [key, prev] = siblings[0]
+        map.set(key, {
+          ...prev,
+          productId: it.productId || prev.productId,
+          name: it.name || prev.name,
+          qty: it.qty >= 1 ? it.qty : prev.qty,
+          price: Number(it.price) > 0 ? Number(it.price) : prev.price,
+          image: it.image || prev.image,
+        })
+        continue
+      }
+      if (siblings.length > 1) {
+        // Multiple colors already on file — ignore colorless touch
+        continue
+      }
+      // No prior line for this product — store as-is (color still empty)
+    }
+
     const key = requestedItemKey(it)
     const prev = map.get(key)
     if (!prev) {
       map.set(key, {
         productId: it.productId,
         name: it.name,
-        color: it.color || '',
+        color: incomingColor,
         qty: Math.max(1, it.qty || 1),
         price: Number(it.price) || 0,
         image: it.image,
@@ -850,7 +917,7 @@ export function mergeRequestedItems(
     map.set(key, {
       productId: it.productId || prev.productId,
       name: it.name || prev.name,
-      color: it.color?.trim() ? it.color : prev.color,
+      color: incomingColor || prev.color,
       qty: it.qty >= 1 ? it.qty : prev.qty,
       price: Number(it.price) > 0 ? Number(it.price) : prev.price,
       image: it.image || prev.image,

@@ -134,7 +134,7 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'update_order',
         description:
-          'Update bag/color/qty for this chat. If an order already exists: merge/replace items (mode=add|replace) or change color, then re-send the order confirm screenshot. If NO order yet: update the last quotation memory the same way and re-send the quotation screenshot; if no quotation exists yet, send a new quotation with the requested bags/colors. For ADD ("ekakuth add"), pass only the NEW bag(s) with mode=add.',
+          'Update bag/color/qty for this chat. If an order already exists: merge/replace items (mode=add|replace) or change color, then re-send the order confirm screenshot. If NO order yet: update the last quotation memory the same way and re-send the quotation screenshot; if no quotation exists yet, send a new quotation with the requested bags/colors. For ADD ("ekakuth" / "dekakuth" / "thawa"), pass only the NEW bag(s) with mode=add and the NEW color — existing quoted colors stay. Same bag in two colors = two lines (e.g. White x1 + Black x2).',
         parameters: {
           type: 'object',
           properties: {

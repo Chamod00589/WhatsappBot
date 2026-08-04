@@ -183,6 +183,8 @@ export function isAddToOrderRequest(text: string): boolean {
   return (
     /\b(add|added|adding)\b/.test(t) ||
     /\b(ekakuth|ekak\s*uth|ekakath|ekath)\b/.test(t) ||
+    // "dekakuth" = two more also; "thunakuth" = three more
+    /\b(dekakuth|dekak\s*uth|deka\s*uth|thunakuth|thunak\s*uth)\b/.test(t) ||
     /\b(thawa|another|plus)\b/.test(t) ||
     /\b(add\s*karaganna|karaganna\s*oni|include|uth\s+add)\b/.test(t) ||
     /\bmeka(ta|ට)?\b.*\b(add|ekakuth|karaganna)\b/.test(t)

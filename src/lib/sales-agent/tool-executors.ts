@@ -558,12 +558,18 @@ async function execUpdateOrder(
   const targetName =
     typeof a.target_name === 'string' ? a.target_name : null
 
-  const items = await resolveItemsArg(ctx, a.items)
   const explicitMode =
     a.mode === 'replace' || a.mode === 'add' ? (a.mode as 'add' | 'replace') : null
+  const hasItemArgs = normalizeItems(a.items).length > 0
   const mode: 'add' | 'replace' =
     explicitMode ||
-    (isAddToOrderRequest(ctx.burstText) ? 'add' : items.length ? 'add' : 'replace')
+    (isAddToOrderRequest(ctx.burstText) ? 'add' : hasItemArgs ? 'add' : 'replace')
+
+  // Resolve AFTER mode is known so mode=add keeps an explicit new color
+  // (do not force pending White onto "add Black x2").
+  const items = await resolveItemsArg(ctx, a.items, {
+    preserveExplicitColor: mode === 'add',
+  })
 
   const recent = await findRecentOrderForPhone(ctx.contactPhone)
 
@@ -960,6 +966,7 @@ async function sendCustomQr(
 async function resolveItemsArg(
   ctx: ToolExecContext,
   raw: unknown,
+  opts?: { preserveExplicitColor?: boolean },
 ): Promise<OrderLineItem[]> {
   const normalized = normalizeItems(raw)
   if (!normalized.length) return []
@@ -984,10 +991,13 @@ async function resolveItemsArg(
   let items = await resolveLineItems(intents.filter((i) => i.name))
 
   // Prefer colors/qty saved from identify / prior quote over model guesses
+  // — except on mode=add with an explicit new color (White + Black carts).
   try {
     const pending = await loadPendingQuoted(ctx)
     if (pending.length) {
-      items = applyPendingOverridesToItems(items, pending)
+      items = applyPendingOverridesToItems(items, pending, {
+        preserveExplicitColor: opts?.preserveExplicitColor,
+      })
       // Re-resolve images for corrected colors
       items = await resolveLineItems(
         items.map(

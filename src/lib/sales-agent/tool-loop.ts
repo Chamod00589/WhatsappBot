@@ -156,6 +156,8 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
     '- Other FAQ → answer_policy with the matching FAQ id.',
     '- Confirms pending order (ok/hari/yes) → confirm_order.',
     '- Add another bag / change color before OR after order create → update_order (mode=add for new bags; color for recolor). If no order yet, server updates the last quotation and re-sends it; if no quotation yet, sends a new quotation.',
+    '- "dekakuth" / "ekakuth" / "thawa" = ADD onto the last quotation. Pass only the NEW lines. If they already have White x1 and ask for 2 Black of the same bag, items=[{name, color:Black, quantity:2}] mode=add — do NOT replace White with Black.',
+    '- "me color" after a product QR (all colors shown) is ambiguous — ask which color unless Session state / swipe-reply names one. Never invent Black.',
     '- After an order exists, update_order re-sends the order confirm screenshot.',
     '- Wholesale, complaints, angry, unknown, or no matching FAQ → handover_to_human.',
     languageHintForPrompt(replyMode),

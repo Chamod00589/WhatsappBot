@@ -27,6 +27,7 @@ import { sendOrderConfirmScreenshot } from '../order-screenshot'
 import {
   enrichQuotationLineItems,
   sendQuotationScreenshot,
+  buildQuotationTotalCaption,
 } from '../quotation-screenshot'
 import { maybeSendAddressRequestQrOnce } from '../address-request-qr'
 import { addNamedTag } from '../tags'
@@ -333,8 +334,10 @@ export async function actionSendQuotation(args: {
   if (!items.length) return { ok: false, message: 'No items for quotation' }
 
   // Address format is NOT captioned on the quotation — the Address Quick
-  // Reply is sent once per chat after the first successful quote.
+  // Reply is sent once per chat after the first successful quote. The
+  // image caption is always the quotation total only.
   const enriched = await enrichQuotationLineItems(db, accountId, items)
+  const totalCaption = buildQuotationTotalCaption(enriched)
 
   const rememberPending = async () => {
     await db
@@ -375,6 +378,7 @@ export async function actionSendQuotation(args: {
       contactId,
       configOwnerUserId,
       items: enriched,
+      caption: totalCaption,
     })
     // Remember quoted lines so a follow-up address creates the order with
     // the same catalog names / qty / colors (avoids "Bloom Bag" mismatch).
@@ -389,15 +393,13 @@ export async function actionSendQuotation(args: {
     const errMsg = err instanceof Error ? err.message : String(err)
     // Fallback: text quotation (same numbers) — no address-format caption
     const lines: string[] = ['*Price Quotation*', '']
-    let sub = 0
     for (const it of enriched) {
       const line = Number(it.price) * Number(it.qty)
-      sub += line
       const color = it.color ? ` (${it.color})` : ''
       lines.push(`• ${it.name}${color} x${it.qty} — ${formatLkr(line)}`)
     }
     lines.push(`Shipping: ${formatLkr(QUOTATION_SHIPPING_LKR)}`)
-    lines.push(`Total: ${formatLkr(sub + QUOTATION_SHIPPING_LKR)}`)
+    lines.push(totalCaption)
 
     await engineSendText({
       accountId,
