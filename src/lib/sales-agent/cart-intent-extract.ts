@@ -21,11 +21,14 @@ import {
 } from '@/lib/ai/providers/gemini'
 import type { MatchableQuickReply } from './match-products'
 import { productDisplayName } from './order-intent'
+import { normalizeMatchText } from './normalize'
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 
 export type CartIntentKind = 'quotation' | 'edit_cart' | 'none'
+
+/** @deprecated Prefer CartActionType via actions[]. Kept for verify/logging compat. */
 export type CartOperation =
   | 'set'
   | 'add'
@@ -34,23 +37,42 @@ export type CartOperation =
   | 'remove'
   | null
 
-export type CartExtractedItem = {
-  /** Exact catalog product id when the model selected from the list. */
+/** Ordered cart edits — server applies these left-to-right, no coercion. */
+export type CartActionType = 'set' | 'add' | 'remove' | 'set_qty' | 'add_qty'
+
+export type CartAction = {
+  type: CartActionType
   productId: string | null
-  /** Exact catalog name when selected from the list (preferred). */
   name: string | null
-  /** Customer's words (fallback if name/productId missing). */
+  /** Customer words (fallback if name/productId missing). */
   mentioned: string
   qty: number | null
-  /** Must be one of that product's colors from the catalog list, or null. */
+  /** Exact catalog color, or null when not stated / color-only remove by name. */
+  color: string | null
+  confidence: number
+}
+
+export type CartExtractedItem = {
+  productId: string | null
+  name: string | null
+  mentioned: string
+  qty: number | null
   color: string | null
   confidence: number
 }
 
 export type CartIntentExtraction = {
   intent: CartIntentKind
+  /** Ordered edits — source of truth for the pipeline. */
+  actions: CartAction[]
+  /**
+   * Derived from actions (or legacy LLM fields) for logging / verify.
+   * @deprecated Do not branch apply logic on this.
+   */
   operation: CartOperation
+  /** Derived: item-shaped rows from add/set/set_qty/add_qty actions. */
   items: CartExtractedItem[]
+  /** Derived: first remove action match, when present. */
   target: { mentioned: string | null; color: string | null }
 }
 
@@ -62,6 +84,7 @@ export type CartExtractResult = {
 
 const EMPTY_EXTRACTION: CartIntentExtraction = {
   intent: 'none',
+  actions: [],
   operation: null,
   items: [],
   target: { mentioned: null, color: null },
@@ -98,54 +121,319 @@ You are given the FULL product catalog below. When the customer asks for bag(s),
 Return ONLY valid JSON (no markdown):
 {
   "intent": "quotation" | "edit_cart" | "none",
-  "operation": "set" | "add" | "add_qty" | "replace_qty" | "remove" | null,
-  "items": [
+  "actions": [
     {
-      "productId": "exact productId from catalog",
-      "name": "exact name from catalog",
-      "mentioned": "customer words that matched this bag",
-      "qty": number,
-      "color": "exact color spelling from that product's colors list, or null",
+      "type": "set" | "add" | "remove" | "set_qty" | "add_qty",
+      "productId": "exact productId from catalog (or null for color-only remove)",
+      "name": "exact name from catalog (or null)",
+      "mentioned": "customer words for this edit",
+      "qty": number | null,
+      "color": "exact color from that product's colors list, or null",
       "confidence": 0-1
     }
-  ],
-  "target": { "mentioned": string|null, "color": string|null }
+  ]
 }
 
 Rules:
 - ALWAYS pick productId + name from the CATALOG LIST. Never invent bags not on the list.
 - color MUST be copied exactly from that product's colors=[...] when the customer stated a color. If they did not say a color, use null (server will ask).
-- When Session state lists PHOTO IDENTIFIED bag(s), "this bag" / "that bag" / "me bag" / "meka" / "meke" means THAT photo product — include it as an items[] row (use the identified productId/name/color). Do NOT drop the photo bag when they also name another bag.
-- Example: photo = Mini Shoulder Bag (Black) + text "Can i buy this bag and puff Pink 2 bags" → TWO items: Mini Black qty 1 + Puff Pink qty 2.
-- qty = how many pieces they want. Understand Singlish freely (dekak=2, thunak=3, "2k"/"2i"=2, "1kui"=1, "ekak"=1). Default qty=1 when they want the bag but gave no count.
-- Keep each bag/color as a SEPARATE items[] row — do NOT merge. Same bag in two colors = two items.
-- Example: "Cloudy white 2i black 1k" → two items: Cloudy White qty 2 + Cloudy Black qty 1 (same productId, different colors).
+- qty = how many pieces. Singlish: dekak=2, thunak=3, "2k"/"2i"=2, "1kui"=1, "ekak"=1. Default qty=1 when they want the bag but gave no count.
+- Keep each bag/color as a SEPARATE action — do NOT merge. Same bag in two colors = two actions.
 - confidence = how sure the catalog match is (0-1). Use ≥0.9 when productId is clear.
-- intent=quotation when they ask price / kochchara / quote / want bags to buy.
-- intent=edit_cart when they add/remove/change qty/color on an existing cart OR on CURRENT LIVE ORDER lines listed in Session state. Prefer productId/name/color from those selected bags / live order lines — never invent bags from unrelated screenshots.
-- intent=none for FAQ, delivery time, greetings, address-only, unrelated chat, OR when they only ask for photos / colors / details / info of a bag (server sends the product card — do NOT quote).
-- Example: "Cloudy bag eketh photos ewanawada" → intent=none (photos ask).
-- Example: Session has CURRENT LIVE ORDER Cloudy Brown x1 + Bloom White x2; customer "white eken oni, brown ain karanna" → intent=edit_cart, remove Brown (or recolor that line to White), keep other lines — use live order productIds.
-- Color replace (critical): "White color eka epa. Eka ain karala brown 3k ekathukaranna" with cart Cloudy White x1 → intent=edit_cart, operation=add, items=[{Cloudy, Brown, qty:3}], target={color:"White"} (server removes White then upserts Brown×3). Do NOT use replace_qty (that keeps White and only changes qty).
-- operation meanings (critical — wrong op doubles qty):
-  - set = new quote / replace whole cart with items[]
-  - add = ADD extra bags ("white bag ekakuth", "thawa pink 1k", "me bag ekath denna", "another black"). qty = pieces to ADD (default 1), NOT a new cart total. Also used with target=color-to-remove for color replace.
-  - add_qty = increase qty by N ("thawa ekak", "one more") without stating a final total
-  - replace_qty = SET qty to the number they stated for a bag already in cart ("Pink bag 2i oni", "pink 2k denna", "qty eka 2"). Use this when they restate how many they want — NEVER add in that case. NEVER use replace_qty when removing one color and adding another.
-  - remove = drop a bag/color from cart or live order (pure remove only — no replacement color)
-- Example bug to avoid: cart already has Pink qty 2; customer says "Pink bag 2i oni. Meke 4k thiynawane" → operation=replace_qty, qty=2 (NOT add — add would make 4).
-- Example bug to avoid: swipe-reply "Me bag ekath denna" → operation=add, items=[that bag qty 1] only (do NOT list the whole prior cart again).
-- Prices in the catalog are for your understanding only — do NOT invent different prices; the server will quote from the database.
-- Never invent productIds or colors not listed for that product.
-- When Session lists SELECTED BAGS or CURRENT LIVE ORDER, treat those as the customer's current selection for edit/add/remove.
+
+intent:
+- quotation = ask price / kochchara / quote / want bags to buy (new selection).
+- edit_cart = add/remove/change qty/color on SELECTED BAGS or CURRENT LIVE ORDER in Session state.
+- none = FAQ, delivery, greetings, address-only, OR only asking photos/colors/details of a bag (server sends product card — do NOT quote).
+- Example: "Cloudy bag eketh photos ewanawada" → intent=none.
+
+actions (CRITICAL — server executes these IN ORDER with no guessing):
+- set = put this line into a NEW cart (quotation / replace whole selection). List every bag they want as separate set actions. Photo/"this bag" must be included when Session lists PHOTO IDENTIFIED bags.
+- add = ADD this bag/color onto the existing cart ("ekakuth", "thawa pink 1k", "me bag ekath denna", "brown 3k ekathukaranna"). qty = pieces to ADD.
+- remove = DROP matching bag/color from cart ("white eka epa", "ain karanna", "nathiwa"). Match by color and/or productId from Session selected bags / live order.
+- set_qty = SET absolute qty on an existing line ("Pink bag 2i oni", "qty eka 2") — NOT add. Use when they restate how many they want total for that line.
+- add_qty = increase qty by N on an existing line ("thawa ekak", "one more") without naming a final total.
+
+Compound edits = MULTIPLE actions in order. Never collapse into one operation.
+- "White color eka epa. Eka ain karala brown 3k ekathukaranna" with Cloudy White in cart →
+  [{"type":"remove","color":"White","productId":"<cloudy id>","mentioned":"White color eka",...},{"type":"add","color":"Brown","qty":3,"productId":"<cloudy id>",...}]
+- "white eken oni, brown ain karanna" on live order with Brown →
+  [{"type":"remove","color":"Brown",...},{"type":"add","color":"White","qty":1,...}]
+  (or set_qty/recolor via remove+add — never invent a swap op)
+- Photo Mini Black + "this bag and puff Pink 2" → two set actions: Mini Black qty1 + Puff Pink qty2.
+- Cart has Pink qty2; "Pink bag 2i oni" → one set_qty action qty=2 (NOT add).
+- Swipe-reply "Me bag ekath denna" → one add action for that bag qty1 only (do NOT re-list the whole cart).
+
+Never invent productIds or colors not listed for that product.
+When Session lists SELECTED BAGS or CURRENT LIVE ORDER, use those productIds/colors for edit/remove/set_qty.
 
 CATALOG (select ONLY from here):
 ${catalogBlock || '(empty catalog)'}
 `
 }
 
+function parseActionRow(row: Record<string, unknown>): CartAction | null {
+  const typeRaw = String(row.type || row.action || '').toLowerCase()
+  const type: CartActionType | null =
+    typeRaw === 'set' ||
+    typeRaw === 'add' ||
+    typeRaw === 'remove' ||
+    typeRaw === 'set_qty' ||
+    typeRaw === 'add_qty' ||
+    typeRaw === 'replace_qty'
+      ? typeRaw === 'replace_qty'
+        ? 'set_qty'
+        : (typeRaw as CartActionType)
+      : null
+  if (!type) return null
+
+  const productId =
+    typeof row.productId === 'string' && row.productId.trim()
+      ? row.productId.trim()
+      : typeof row.product_id === 'string' && row.product_id.trim()
+        ? row.product_id.trim()
+        : null
+  const name =
+    typeof row.name === 'string' && row.name.trim() ? row.name.trim() : null
+  const mentioned =
+    typeof row.mentioned === 'string' && row.mentioned.trim()
+      ? row.mentioned.trim()
+      : name || productId || (typeof row.color === 'string' ? row.color : '') || ''
+  const qtyNum = Number(row.qty)
+  const qty =
+    row.qty == null || row.qty === ''
+      ? null
+      : Number.isFinite(qtyNum) && qtyNum > 0
+        ? Math.floor(qtyNum)
+        : null
+  const color =
+    typeof row.color === 'string' && row.color.trim() ? row.color.trim() : null
+  let confidence = Number(row.confidence)
+  if (!Number.isFinite(confidence)) {
+    confidence = productId || name || color ? 0.95 : 0.5
+  }
+  confidence = Math.max(0, Math.min(1, confidence))
+
+  // remove may be color-only; other types need some identity
+  if (type !== 'remove' && !mentioned && !productId && !name) return null
+  if (type === 'remove' && !color && !productId && !name && !mentioned) return null
+
+  return {
+    type,
+    productId,
+    name,
+    mentioned: mentioned || name || productId || color || '',
+    qty,
+    color,
+    confidence,
+  }
+}
+
+function parseItemRow(row: Record<string, unknown>): CartExtractedItem | null {
+  const productId =
+    typeof row.productId === 'string' && row.productId.trim()
+      ? row.productId.trim()
+      : typeof row.product_id === 'string' && row.product_id.trim()
+        ? row.product_id.trim()
+        : null
+  const name =
+    typeof row.name === 'string' && row.name.trim() ? row.name.trim() : null
+  const mentioned =
+    typeof row.mentioned === 'string' && row.mentioned.trim()
+      ? row.mentioned.trim()
+      : name || productId || ''
+  if (!mentioned && !productId && !name) return null
+  const qtyNum = Number(row.qty)
+  const qty =
+    row.qty == null || row.qty === ''
+      ? null
+      : Number.isFinite(qtyNum) && qtyNum > 0
+        ? Math.floor(qtyNum)
+        : null
+  const color =
+    typeof row.color === 'string' && row.color.trim() ? row.color.trim() : null
+  let confidence = Number(row.confidence)
+  if (!Number.isFinite(confidence)) {
+    confidence = productId || name ? 0.95 : 0.5
+  }
+  confidence = Math.max(0, Math.min(1, confidence))
+  return {
+    productId,
+    name,
+    mentioned: mentioned || name || productId || '',
+    qty,
+    color,
+    confidence,
+  }
+}
+
+function itemToAction(
+  type: CartActionType,
+  item: CartExtractedItem,
+): CartAction {
+  return {
+    type,
+    productId: item.productId,
+    name: item.name,
+    mentioned: item.mentioned,
+    qty: item.qty,
+    color: item.color,
+    confidence: item.confidence,
+  }
+}
+
+/**
+ * Convert legacy operation+items+target into ordered actions.
+ * Special case: add + target color + items in a different color → remove then add
+ * (the failure mode of "white epa + brown 3k").
+ */
+export function legacyFieldsToActions(args: {
+  operation: CartOperation
+  items: CartExtractedItem[]
+  target: { mentioned: string | null; color: string | null }
+  intent: CartIntentKind
+}): CartAction[] {
+  const { operation, items, target, intent } = args
+  if (!operation && !items.length) return []
+
+  const op =
+    operation ||
+    (intent === 'edit_cart' ? 'add' : intent === 'quotation' ? 'set' : null)
+  if (!op) return []
+
+  const targetColor = target.color?.trim() || null
+  const targetMention = target.mentioned?.trim() || null
+
+  // Compound: remove target color, then add the new lines
+  if (
+    (op === 'add' || op === 'set') &&
+    targetColor &&
+    items.some((it) => {
+      const c = it.color?.trim()
+      return c && normalizeMatchText(c) !== normalizeMatchText(targetColor)
+    })
+  ) {
+    const actions: CartAction[] = [
+      {
+        type: 'remove',
+        productId: null,
+        name: null,
+        mentioned: targetMention || targetColor,
+        qty: null,
+        color: targetColor,
+        confidence: 0.95,
+      },
+    ]
+    for (const it of items) {
+      actions.push(itemToAction('add', it))
+    }
+    return actions
+  }
+
+  if (op === 'remove') {
+    if (items.length) {
+      return items.map((it) =>
+        itemToAction('remove', {
+          ...it,
+          color: it.color || targetColor,
+        }),
+      )
+    }
+    return [
+      {
+        type: 'remove',
+        productId: null,
+        name: null,
+        mentioned: targetMention || targetColor || '',
+        qty: null,
+        color: targetColor,
+        confidence: 0.95,
+      },
+    ]
+  }
+
+  if (op === 'replace_qty') {
+    return items.map((it) => itemToAction('set_qty', it))
+  }
+  if (op === 'add_qty') {
+    return items.map((it) => itemToAction('add_qty', it))
+  }
+  if (op === 'add') {
+    return items.map((it) => itemToAction('add', it))
+  }
+  // set
+  return items.map((it) => itemToAction('set', it))
+}
+
+/** Derive deprecated operation/items/target from actions for logging + verify. */
+export function deriveCompatFromActions(
+  actions: CartAction[],
+): Pick<CartIntentExtraction, 'operation' | 'items' | 'target'> {
+  if (!actions.length) {
+    return {
+      operation: null,
+      items: [],
+      target: { mentioned: null, color: null },
+    }
+  }
+
+  const types = new Set(actions.map((a) => a.type))
+  let operation: CartOperation = null
+  if (types.size === 1) {
+    const only = actions[0].type
+    operation =
+      only === 'set_qty'
+        ? 'replace_qty'
+        : only === 'add_qty'
+          ? 'add_qty'
+          : only === 'set'
+            ? 'set'
+            : only === 'add'
+              ? 'add'
+              : only === 'remove'
+                ? 'remove'
+                : null
+  } else if (types.has('remove') && (types.has('add') || types.has('set'))) {
+    operation = 'set' // compound → full cart replace semantics downstream
+  } else if (types.has('set')) {
+    operation = 'set'
+  } else if (types.has('add')) {
+    operation = 'add'
+  } else if (types.has('remove')) {
+    operation = 'remove'
+  }
+
+  const items: CartExtractedItem[] = actions
+    .filter((a) => a.type !== 'remove')
+    .map((a) => ({
+      productId: a.productId,
+      name: a.name,
+      mentioned: a.mentioned,
+      qty: a.qty,
+      color: a.color,
+      confidence: a.confidence,
+    }))
+
+  const remove = actions.find((a) => a.type === 'remove')
+  const target = {
+    mentioned: remove?.mentioned || null,
+    color: remove?.color || null,
+  }
+
+  return { operation, items, target }
+}
+
+function finalizeExtraction(
+  intent: CartIntentKind,
+  actions: CartAction[],
+): CartIntentExtraction {
+  const compat = deriveCompatFromActions(actions)
+  return { intent, actions, ...compat }
+}
+
 /**
  * Parse model JSON into a safe CartIntentExtraction (for tests + live path).
+ * Prefers actions[]; falls back to legacy operation+items+target.
  */
 export function parseCartIntentJson(raw: unknown): CartIntentExtraction {
   let obj: Record<string, unknown> | null = null
@@ -170,6 +458,37 @@ export function parseCartIntentJson(raw: unknown): CartIntentExtraction {
   const intent: CartIntentKind =
     intentRaw === 'quotation' || intentRaw === 'edit_cart' ? intentRaw : 'none'
 
+  // Nested edits[] / actions[] (new schema)
+  const actionsRaw = Array.isArray(obj.actions)
+    ? obj.actions
+    : Array.isArray(obj.edits)
+      ? obj.edits
+      : null
+
+  if (actionsRaw && actionsRaw.length) {
+    const actions: CartAction[] = []
+    for (const rawAct of actionsRaw) {
+      if (!rawAct || typeof rawAct !== 'object') continue
+      const row = rawAct as Record<string, unknown>
+      // Support { action, match, item } shape
+      if (row.match && typeof row.match === 'object') {
+        const match = row.match as Record<string, unknown>
+        const item =
+          row.item && typeof row.item === 'object'
+            ? (row.item as Record<string, unknown>)
+            : {}
+        const merged = { ...match, ...item, type: row.type || row.action }
+        const parsed = parseActionRow(merged)
+        if (parsed) actions.push(parsed)
+        continue
+      }
+      const parsed = parseActionRow(row)
+      if (parsed) actions.push(parsed)
+    }
+    if (actions.length) return finalizeExtraction(intent, actions)
+  }
+
+  // Legacy operation + items + target
   const opRaw = obj.operation == null ? null : String(obj.operation).toLowerCase()
   const operation: CartOperation =
     opRaw === 'set' ||
@@ -184,42 +503,8 @@ export function parseCartIntentJson(raw: unknown): CartIntentExtraction {
   const items: CartExtractedItem[] = []
   for (const it of itemsRaw) {
     if (!it || typeof it !== 'object') continue
-    const row = it as Record<string, unknown>
-    const productId =
-      typeof row.productId === 'string' && row.productId.trim()
-        ? row.productId.trim()
-        : typeof row.product_id === 'string' && row.product_id.trim()
-          ? row.product_id.trim()
-          : null
-    const name =
-      typeof row.name === 'string' && row.name.trim() ? row.name.trim() : null
-    const mentioned =
-      typeof row.mentioned === 'string' && row.mentioned.trim()
-        ? row.mentioned.trim()
-        : name || productId || ''
-    if (!mentioned && !productId && !name) continue
-    const qtyNum = Number(row.qty)
-    const qty =
-      row.qty == null || row.qty === ''
-        ? null
-        : Number.isFinite(qtyNum) && qtyNum > 0
-          ? Math.floor(qtyNum)
-          : null
-    const color =
-      typeof row.color === 'string' && row.color.trim() ? row.color.trim() : null
-    let confidence = Number(row.confidence)
-    if (!Number.isFinite(confidence)) {
-      confidence = productId || name ? 0.95 : 0.5
-    }
-    confidence = Math.max(0, Math.min(1, confidence))
-    items.push({
-      productId,
-      name,
-      mentioned: mentioned || name || productId || '',
-      qty,
-      color,
-      confidence,
-    })
+    const parsed = parseItemRow(it as Record<string, unknown>)
+    if (parsed) items.push(parsed)
   }
 
   const targetObj =
@@ -237,7 +522,13 @@ export function parseCartIntentJson(raw: unknown): CartIntentExtraction {
         : null,
   }
 
-  return { intent, operation, items, target }
+  const actions = legacyFieldsToActions({
+    operation,
+    items,
+    target,
+    intent,
+  })
+  return finalizeExtraction(intent, actions)
 }
 
 /**
@@ -264,7 +555,7 @@ export async function extractCartIntent(args: {
       ? `Current order / session state:\n${args.sessionExtra.trim()}`
       : '',
     `Latest customer message(s):\n${burstText.trim()}`,
-    'Select matching bags from the catalog in the system prompt. Return JSON only.',
+    'Select matching bags from the catalog in the system prompt. Return JSON only with ordered actions[].',
   ]
     .filter(Boolean)
     .join('\n\n')

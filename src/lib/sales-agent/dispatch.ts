@@ -593,8 +593,11 @@ export async function dispatchSalesAgentNow(
         extractUsage = extracted.usage
         log.step(
           'cart_extract',
-          `intent=${extracted.extraction.intent} op=${extracted.extraction.operation || 'null'} items=${extracted.extraction.items.length}`,
-          extracted.extraction,
+          `intent=${extracted.extraction.intent} actions=${extracted.extraction.actions?.length || 0} op=${extracted.extraction.operation || 'null'}`,
+          {
+            ...extracted.extraction,
+            actions: extracted.extraction.actions,
+          },
         )
 
         if (

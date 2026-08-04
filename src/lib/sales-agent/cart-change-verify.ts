@@ -46,12 +46,8 @@ function parseColorSwapHint(
   const raw = text.replace(/\s+/g, ' ').trim()
   if (!raw) return null
   const t = raw.toLowerCase()
-  const hasRemove = /\b(ain|nathiwa|nathuwa|remove|without|epa)\b/.test(t)
-  const hasWant =
-    /\b(eken|oni|onne|denna|want|ganna|ganne|ekathu|ekathukaranna|athukaranna|ekath\s*karanna)\b/.test(
-      t,
-    )
-  if (!hasRemove || !hasWant) return null
+  if (!/\b(ain|nathiwa|nathuwa|remove|without)\b/.test(t)) return null
+  if (!/\b(eken|oni|onne|denna|want|ganna|ganne)\b/.test(t)) return null
   const clauses = raw
     .split(/[.!?\n]+|(?=\bmeke\b)|(?=\bthawa\b)/i)
     .map((s) => s.trim())
@@ -62,25 +58,17 @@ function parseColorSwapHint(
     const colors = extractColorsFromText(clause)
     if (!colors.length) continue
     const sl = clause.toLowerCase()
-    const ainThenColor = /\bain\s+kara(?:la|nna)?\s+\S+/.test(sl)
-    const isRemove =
-      /\b(ain|nathiwa|nathuwa|remove|without|epa)\b/.test(sl) && !ainThenColor
+    const isRemove = /\b(ain|nathiwa|nathuwa|remove|without)\b/.test(sl)
     const isWant =
-      /\b(eken|denna|want|ekathu|ekathukaranna|athukaranna)\b/.test(sl) ||
-      ainThenColor ||
+      /\b(eken|denna|want)\b/.test(sl) ||
       (/\b(oni|onne|ganna|ganne)\b/.test(sl) && !isRemove)
     if (isRemove) remove = colors[colors.length - 1]
-    if (isWant && (!isRemove || ainThenColor)) want = colors[0]
+    if (isWant && !isRemove) want = colors[0]
   }
   if ((!want || !remove) && extractColorsFromText(raw).length >= 2) {
     const all = extractColorsFromText(raw)
-    if (/\bepa\b/.test(t) || /\bain\s+kara/.test(t)) {
-      remove = remove || all[0]
-      want = want || all[all.length - 1]
-    } else {
-      want = want || all[0]
-      remove = remove || all[all.length - 1]
-    }
+    want = want || all[0]
+    remove = remove || all[all.length - 1]
   }
   if (
     want &&
@@ -348,6 +336,8 @@ export async function verifyCartChange(args: {
   newItems: CartLineSnapshot[]
   customerText: string
   operation?: CartOperation
+  /** Ordered actions summary from the pipeline (preferred over operation). */
+  actionsSummary?: string
   intent?: string | null
   useSinglish?: boolean
   /** When set, run a short LLM confirm for edits. */
@@ -359,6 +349,7 @@ export async function verifyCartChange(args: {
     newItems,
     customerText,
     operation = null,
+    actionsSummary,
     intent,
     useSinglish = true,
     config,
@@ -392,6 +383,7 @@ export async function verifyCartChange(args: {
       newItems,
       customerText,
       operation,
+      actionsSummary,
       recentCustomerMsgs,
       useSinglish,
     })
@@ -409,13 +401,14 @@ async function verifyCartChangeWithLlm(args: {
   newItems: CartLineSnapshot[]
   customerText: string
   operation: CartOperation
+  actionsSummary?: string
   recentCustomerMsgs: string[]
   useSinglish: boolean
 }): Promise<CartChangeVerifyResult> {
   const system = `You verify WhatsApp bag cart/order edits for ladiesbags.lk.
 Compare OLD cart, NEW cart, and the customer's request.
 Return JSON only: {"ok":true|false,"reason":"short"}
-ok=true only if NEW correctly applies the customer request to OLD (no doubled qty, no wrong bag, no missing keep-lines, color swap applied).
+ok=true only if NEW correctly applies the customer request to OLD (no doubled qty, no wrong bag, no missing keep-lines, color swap / remove+add applied).
 ok=false if NEW looks wrong vs the request.`
 
   const recent =
@@ -427,7 +420,7 @@ ${args.customerText.trim()}
 RECENT CUSTOMER MSGS:
 ${recent}
 
-OPERATION: ${args.operation || 'unknown'}
+ACTIONS: ${args.actionsSummary || args.operation || 'unknown'}
 
 OLD CART:
 ${formatLines(args.oldItems)}

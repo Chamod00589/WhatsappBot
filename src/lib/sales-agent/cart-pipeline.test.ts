@@ -1,21 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { parseCartIntentJson } from './cart-intent-extract'
 import {
+  applyCartActionsToPending,
   applyCartOperationToPending,
   applyColorOnlyToPending,
-  applyColorReplaceToPending,
   applyColorSwapToPending,
   canonicalizeExtractedColor,
   checkQuoteCompleteness,
   coerceCartOperation,
   combineConfidence,
   heuristicLinesFromText,
-  isColorReplaceEdit,
   looksLikeAbsoluteQtyDesire,
   looksLikeColorRemoveRequest,
   mergePhotoPendingIntoResolved,
   parseColorSwapRequest,
-  pickRemoveColorFromText,
+  resolveCartActions,
   resolveExtractionItems,
   resolveMentionedProduct,
   validateProductColor,
@@ -58,7 +57,7 @@ function catalogFixture(): MatchableQuickReply[] {
       needles: buildProductNeedles('Cloudy Shoulder Bag', 'cloudy-1', ['cloudy']),
       bagName: 'Cloudy Shoulder Bag',
       retailPrice: 2500,
-      colors: ['White', 'Black', 'Pink'],
+      colors: ['White', 'Black', 'Pink', 'Brown'],
       matchAliases: ['cloudy'],
     },
   ]
@@ -90,11 +89,69 @@ describe('parseCartIntentJson', () => {
       target: { mentioned: null, color: null },
     })
     expect(parsed.intent).toBe('quotation')
+    expect(parsed.actions).toHaveLength(2)
+    expect(parsed.actions.every((a) => a.type === 'set')).toBe(true)
     expect(parsed.items).toHaveLength(2)
     expect(parsed.items[0].productId).toBe('cloudy-1')
     expect(parsed.items[0].name).toBe('Cloudy Shoulder Bag')
     expect(parsed.items[0].qty).toBe(2)
     expect(parsed.items[1].color).toBe('Black')
+  })
+
+  it('parses ordered actions for remove+add color replace', () => {
+    const parsed = parseCartIntentJson({
+      intent: 'edit_cart',
+      actions: [
+        {
+          type: 'remove',
+          productId: 'cloudy-1',
+          name: 'Cloudy Shoulder Bag',
+          mentioned: 'White color eka',
+          color: 'White',
+          qty: null,
+          confidence: 0.95,
+        },
+        {
+          type: 'add',
+          productId: 'cloudy-1',
+          name: 'Cloudy Shoulder Bag',
+          mentioned: 'brown 3k',
+          color: 'Brown',
+          qty: 3,
+          confidence: 0.95,
+        },
+      ],
+    })
+    expect(parsed.intent).toBe('edit_cart')
+    expect(parsed.actions).toHaveLength(2)
+    expect(parsed.actions[0].type).toBe('remove')
+    expect(parsed.actions[0].color).toBe('White')
+    expect(parsed.actions[1].type).toBe('add')
+    expect(parsed.actions[1].color).toBe('Brown')
+    expect(parsed.actions[1].qty).toBe(3)
+  })
+
+  it('legacy add+target different color becomes remove then add', () => {
+    const parsed = parseCartIntentJson({
+      intent: 'edit_cart',
+      operation: 'add',
+      items: [
+        {
+          productId: 'cloudy-1',
+          name: 'Cloudy Shoulder Bag',
+          mentioned: 'brown',
+          qty: 3,
+          color: 'Brown',
+          confidence: 0.95,
+        },
+      ],
+      target: { color: 'White', mentioned: 'White color eka' },
+    })
+    expect(parsed.actions[0].type).toBe('remove')
+    expect(parsed.actions[0].color).toBe('White')
+    expect(parsed.actions[1].type).toBe('add')
+    expect(parsed.actions[1].color).toBe('Brown')
+    expect(parsed.actions[1].qty).toBe(3)
   })
 
   it('returns none on garbage', () => {
@@ -105,7 +162,7 @@ describe('parseCartIntentJson', () => {
 describe('resolveExtractionItems with catalog productId', () => {
   it('resolves by productId without needle matching', () => {
     const resolved = resolveExtractionItems(
-      {
+      parseCartIntentJson({
         intent: 'quotation',
         operation: 'set',
         items: [
@@ -119,13 +176,127 @@ describe('resolveExtractionItems with catalog productId', () => {
           },
         ],
         target: { mentioned: null, color: null },
-      },
+      }),
       catalogFixture(),
     )
     expect(resolved.clarify).toBeUndefined()
     expect(resolved.lines[0]?.productId).toBe('cloudy-1')
     expect(resolved.lines[0]?.color).toBe('White')
     expect(resolved.lines[0]?.qty).toBe(2)
+  })
+})
+
+describe('applyCartActionsToPending remove+add', () => {
+  it('removes White and adds Brown x3 without touching Red (bug regression)', () => {
+    const existing = [
+      {
+        productId: 'shoulder-1',
+        name: 'Shoulder Bag',
+        color: 'Red',
+        qty: 2,
+        price: 850,
+      },
+      {
+        productId: 'cloudy-1',
+        name: 'Cloudy Shoulder Bag',
+        color: 'White',
+        qty: 1,
+        price: 2500,
+      },
+    ]
+    const extracted = parseCartIntentJson({
+      intent: 'edit_cart',
+      operation: 'add',
+      items: [
+        {
+          productId: 'cloudy-1',
+          name: 'Cloudy Shoulder Bag',
+          mentioned: 'brown',
+          qty: 3,
+          color: 'Brown',
+          confidence: 0.95,
+        },
+      ],
+      target: { color: 'White', mentioned: 'White color eka' },
+    })
+    const { actions, clarify } = resolveCartActions(
+      extracted.actions,
+      catalogFixture(),
+    )
+    expect(clarify).toBeUndefined()
+    const next = applyCartActionsToPending(existing, actions)
+    expect(next).toHaveLength(2)
+    expect(next.find((l) => l.color === 'Red')?.qty).toBe(2)
+    expect(next.find((l) => l.color === 'White')).toBeUndefined()
+    expect(next.find((l) => l.color === 'Brown')?.qty).toBe(3)
+    expect(next.find((l) => l.color === 'Brown')?.productId).toBe('cloudy-1')
+  })
+
+  it('executes explicit actions[] remove then add', () => {
+    const existing = [
+      {
+        productId: 'cloudy-1',
+        name: 'Cloudy Shoulder Bag',
+        color: 'White',
+        qty: 1,
+        price: 2500,
+      },
+    ]
+    const { actions } = resolveCartActions(
+      parseCartIntentJson({
+        intent: 'edit_cart',
+        actions: [
+          {
+            type: 'remove',
+            color: 'White',
+            productId: 'cloudy-1',
+            mentioned: 'white',
+            confidence: 0.99,
+          },
+          {
+            type: 'add',
+            productId: 'cloudy-1',
+            name: 'Cloudy Shoulder Bag',
+            mentioned: 'brown',
+            color: 'Brown',
+            qty: 3,
+            confidence: 0.99,
+          },
+        ],
+      }).actions,
+      catalogFixture(),
+    )
+    const next = applyCartActionsToPending(existing, actions)
+    expect(next).toEqual([
+      expect.objectContaining({
+        productId: 'cloudy-1',
+        color: 'Brown',
+        qty: 3,
+      }),
+    ])
+  })
+
+  it('set_qty sets absolute qty without doubling', () => {
+    const existing = [
+      {
+        productId: 'mini-1',
+        name: 'Mini Shoulder Bag',
+        color: 'Pink',
+        qty: 2,
+        price: 990,
+      },
+    ]
+    const next = applyCartActionsToPending(existing, [
+      {
+        type: 'set_qty',
+        productId: 'mini-1',
+        name: 'Mini Shoulder Bag',
+        color: 'Pink',
+        qty: 2,
+        confidence: 0.99,
+      },
+    ])
+    expect(next[0].qty).toBe(2)
   })
 })
 
@@ -180,14 +351,14 @@ describe('confidence gates', () => {
   it('asks when mid confidence; auto when high', () => {
     const catalog = catalogFixture()
     const mid = resolveExtractionItems(
-      {
+      parseCartIntentJson({
         intent: 'quotation',
         operation: 'set',
         items: [
           { mentioned: 'mini bag', qty: 1, color: 'black', confidence: 0.7, productId: null, name: null },
         ],
         target: { mentioned: null, color: null },
-      },
+      }),
       catalog,
     )
     // unique strong needle may boost into auto — if still mid, clarify
@@ -202,14 +373,14 @@ describe('confidence gates', () => {
     }
 
     const high = resolveExtractionItems(
-      {
+      parseCartIntentJson({
         intent: 'quotation',
         operation: 'set',
         items: [
           { mentioned: 'mini bag', qty: 1, color: 'black', confidence: 0.99, productId: null, name: null },
         ],
         target: { mentioned: null, color: null },
-      },
+      }),
       catalog,
     )
     expect(high.clarify).toBeUndefined()
@@ -681,14 +852,6 @@ describe('color swap brown→white', () => {
     expect(swap?.remove.toLowerCase()).toBe('brown')
   })
 
-  it('parses White epa + brown ekathukaranna as remove White want Brown', () => {
-    const swap = parseColorSwapRequest(
-      'White color eka epa. Eka ain karala brown 3k ekathukaranna',
-    )
-    expect(swap?.remove.toLowerCase()).toBe('white')
-    expect(swap?.want.toLowerCase()).toBe('brown')
-  })
-
   it('recolors brown lines to white and keeps other bags', () => {
     const next = applyColorSwapToPending(
       [
@@ -713,110 +876,5 @@ describe('color swap brown→white', () => {
     expect(next.find((l) => l.productId === 'bloom-1')?.qty).toBe(2)
     expect(next.find((l) => l.productId === 'cloudy-1')?.color).toBe('White')
     expect(next.find((l) => l.productId === 'cloudy-1')?.qty).toBe(1)
-  })
-})
-
-describe('color replace White→Brown with qty (regression)', () => {
-  const burst =
-    'White color eka epa. Eka ain karala brown 3k ekathukaranna'
-  const existing = [
-    {
-      productId: 'shoulder-1',
-      name: 'Shoulder Bag',
-      color: 'Red',
-      qty: 2,
-      price: 850,
-    },
-    {
-      productId: 'cloudy-1',
-      name: 'Cloudy Shoulder Bag',
-      color: 'White',
-      qty: 1,
-      price: 990,
-    },
-  ]
-  const incomingBrown: ResolvedCartLine[] = [
-    {
-      productId: 'cloudy-1',
-      name: 'Cloudy Shoulder Bag',
-      color: 'Brown',
-      qty: 3,
-      confidence: 0.95,
-    },
-  ]
-
-  it('pickRemoveColorFromText finds White from epa clause', () => {
-    expect(pickRemoveColorFromText(burst)?.toLowerCase()).toBe('white')
-  })
-
-  it('detects color-replace edit from extract-shaped input', () => {
-    expect(
-      isColorReplaceEdit({
-        burstText: burst,
-        removeColor: 'White',
-        incoming: incomingBrown,
-        existing,
-      }),
-    ).toBe(true)
-  })
-
-  it('removes White and upserts Brown×3 keeping Red', () => {
-    const next = applyColorReplaceToPending(existing, incomingBrown, 'White')
-    expect(next).toHaveLength(2)
-    expect(next.find((l) => l.color === 'Red')?.qty).toBe(2)
-    expect(next.find((l) => l.color === 'White')).toBeUndefined()
-    expect(next.find((l) => l.color === 'Brown')?.qty).toBe(3)
-    expect(next.find((l) => l.productId === 'cloudy-1')?.color).toBe('Brown')
-  })
-
-  it('does not coerce add→replace_qty when color is changing', () => {
-    // Photo-merge can inject Red; overlaps must not force replace_qty on White
-    const mergedIncoming: ResolvedCartLine[] = [
-      {
-        productId: 'shoulder-1',
-        name: 'Shoulder Bag',
-        color: 'Red',
-        qty: 2,
-        confidence: 1,
-      },
-      ...incomingBrown,
-    ]
-    expect(
-      coerceCartOperation({
-        burstText: burst,
-        operation: 'add',
-        intent: 'edit_cart',
-        existing,
-        incoming: mergedIncoming,
-      }),
-    ).toBe('add')
-  })
-
-  it('still coerces Pink 2i oni → replace_qty (same color restatement)', () => {
-    expect(
-      coerceCartOperation({
-        burstText: 'Pink bag 2i oni. Meke 4k thiynawane',
-        operation: 'add',
-        intent: 'edit_cart',
-        existing: [
-          {
-            productId: 'mini-1',
-            name: 'Mini Shoulder Bag',
-            color: 'Pink',
-            qty: 2,
-            price: 990,
-          },
-        ],
-        incoming: [
-          {
-            productId: 'mini-1',
-            name: 'Mini Shoulder Bag',
-            color: 'Pink',
-            qty: 2,
-            confidence: 0.95,
-          },
-        ],
-      }),
-    ).toBe('replace_qty')
   })
 })

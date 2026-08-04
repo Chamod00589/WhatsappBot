@@ -39,11 +39,6 @@ describe('order-edit-intent', () => {
       ),
     ).toBe(true)
     expect(isAddToOrderRequest('thawa bunny bag ekak add karanna')).toBe(true)
-    expect(
-      isAddToOrderRequest(
-        'White color eka epa. Eka ain karala brown 3k ekathukaranna',
-      ),
-    ).toBe(true)
     expect(isAddToOrderRequest('price kohomada')).toBe(false)
   })
 

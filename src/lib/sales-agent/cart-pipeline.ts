@@ -9,9 +9,12 @@ import {
   isAddToOrderRequest,
 } from './order-edit-intent'
 import type {
+  CartAction,
+  CartActionType,
   CartIntentExtraction,
   CartOperation,
 } from './cart-intent-extract'
+import { deriveCompatFromActions, legacyFieldsToActions } from './cart-intent-extract'
 import {
   COLOR_ALIASES,
   extractAllQtys,
@@ -39,18 +42,63 @@ export const CART_CONFIDENCE_AUTO = 0.9
 export const CART_CONFIDENCE_ASK = 0.6
 export const CART_MAX_QTY = 50
 
-/** Want-side cues: include "ekathukaranna" / "athukaranna" (add together). */
-const COLOR_SWAP_WANT_RE =
-  /\b(eken|oni|onne|denna|want|ganna|ganne|ekathu|ekathukaranna|athukaranna|ekath\s*karanna)\b/
-const COLOR_SWAP_REMOVE_RE =
-  /\b(ain|nathiwa|nathuwa|remove|without|epa)\b/
+/** Ensure extraction has actions[] (re-derive from legacy fields if needed). */
+export function ensureExtractionActions(
+  extraction: CartIntentExtraction,
+): CartIntentExtraction {
+  if (extraction.actions?.length) {
+    return {
+      ...extraction,
+      ...deriveCompatFromActions(extraction.actions),
+    }
+  }
+  // Already empty — keep as-is
+  if (!extraction.operation && !extraction.items?.length) {
+    return {
+      ...extraction,
+      actions: extraction.actions || [],
+    }
+  }
+  // Re-run legacy conversion when caller built operation+items without actions
+  const actions = legacyFieldsToActions({
+    operation: extraction.operation,
+    items: extraction.items || [],
+    target: extraction.target || { mentioned: null, color: null },
+    intent: extraction.intent,
+  })
+  return {
+    intent: extraction.intent,
+    actions,
+    ...deriveCompatFromActions(actions),
+  }
+}
+
+function extractionFromLines(
+  intent: CartIntentExtraction['intent'],
+  type: CartActionType,
+  lines: ResolvedCartLine[],
+): CartIntentExtraction {
+  const actions: CartAction[] = lines.map((l) => ({
+    type,
+    productId: l.productId,
+    name: l.name,
+    mentioned: l.name,
+    qty: l.qty,
+    color: l.color,
+    confidence: l.confidence,
+  }))
+  return {
+    intent,
+    actions,
+    ...deriveCompatFromActions(actions),
+  }
+}
 
 /**
  * "White eken oni + brown ain karanna" → want White, remove Brown.
  * Prefer per-clause matching so "oni" in the want sentence does not
  * also tag the remove sentence.
- * "White epa … brown 3k ekathukaranna" → remove White, want Brown
- * ("ain karala COLOR" treats COLOR as want, not remove).
+ * @deprecated Color swaps are expressed as remove+add actions from extract.
  */
 export function parseColorSwapRequest(
   text: string,
@@ -58,8 +106,8 @@ export function parseColorSwapRequest(
   const raw = text.replace(/\s+/g, ' ').trim()
   if (!raw) return null
   const t = raw.toLowerCase()
-  const hasRemove = COLOR_SWAP_REMOVE_RE.test(t)
-  const hasWant = COLOR_SWAP_WANT_RE.test(t)
+  const hasRemove = /\b(ain|nathiwa|nathuwa|remove|without)\b/.test(t)
+  const hasWant = /\b(eken|oni|onne|denna|want|ganna|ganne)\b/.test(t)
   if (!hasRemove || !hasWant) return null
 
   const clauses = raw
@@ -74,28 +122,19 @@ export function parseColorSwapRequest(
     const colors = extractColorsFromText(clause)
     if (!colors.length) continue
     const sl = clause.toLowerCase()
-    // "ain karala brown" → color AFTER ain is the replacement (not the remove)
-    const ainThenColor = /\bain\s+kara(?:la|nna)?\s+\S+/.test(sl)
-    const isRemove = COLOR_SWAP_REMOVE_RE.test(sl) && !ainThenColor
+    const isRemove = /\b(ain|nathiwa|nathuwa|remove|without)\b/.test(sl)
     const isWant =
-      COLOR_SWAP_WANT_RE.test(sl) ||
-      ainThenColor ||
+      /\b(eken|denna|want)\b/.test(sl) ||
       (/\b(oni|onne|ganna|ganne)\b/.test(sl) && !isRemove)
     if (isRemove) remove = colors[colors.length - 1]
-    if (isWant && (!isRemove || ainThenColor)) want = colors[0]
+    if (isWant && !isRemove) want = colors[0]
   }
 
-  // Fallback when remove cue is "epa" on first color and want is later color
+  // Fallback: first color = want, last = remove when both cues in one clause
   if ((!want || !remove) && extractColorsFromText(raw).length >= 2) {
     const all = extractColorsFromText(raw)
-    // "White … epa … brown …" → first=remove, last=want (common Singlish order)
-    if (/\bepa\b/.test(t) || /\bain\s+kara/.test(t)) {
-      remove = remove || all[0]
-      want = want || all[all.length - 1]
-    } else {
-      want = want || all[0]
-      remove = remove || all[all.length - 1]
-    }
+    want = want || all[0]
+    remove = remove || all[all.length - 1]
   }
 
   if (
@@ -106,128 +145,6 @@ export function parseColorSwapRequest(
     return { want, remove }
   }
   return null
-}
-
-/**
- * Color named with remove language ("White eka epa", "sudu ain").
- * Skips colors that only appear after "ain karala" (those are replacements).
- */
-export function pickRemoveColorFromText(text: string): string | null {
-  const raw = text.replace(/\s+/g, ' ').trim()
-  if (!raw) return null
-  const clauses = raw
-    .split(/[.!?\n]+|(?=\bmeke\b)|(?=\bthawa\b)/i)
-    .map((s) => s.trim())
-    .filter(Boolean)
-  for (const clause of clauses.length ? clauses : [raw]) {
-    const sl = clause.toLowerCase()
-    if (/\bain\s+kara(?:la|nna)?\s+\S+/.test(sl)) continue
-    if (!COLOR_SWAP_REMOVE_RE.test(sl)) continue
-    const colors = extractColorsFromText(clause)
-    if (colors.length) {
-      return canonicalizeExtractedColor(colors[0])
-    }
-  }
-  return null
-}
-
-/**
- * Remove a color from the cart, then upsert replacement lines (absolute qty).
- * "White epa + brown 3k" → drop White lines, set Brown qty 3, keep other bags.
- */
-export function applyColorReplaceToPending(
-  existing: OrderPendingQuotedItem[],
-  incoming: ResolvedCartLine[],
-  removeColor: string,
-): OrderPendingQuotedItem[] {
-  const removeN = normalizeMatchText(removeColor)
-  if (!removeN) return existing
-
-  let next = existing.filter(
-    (e) => normalizeMatchText(e.color || '') !== removeN,
-  )
-
-  for (const line of incoming) {
-    if (!line.productId) continue
-    const color = canonicalizeExtractedColor(line.color)
-    if (!color) continue
-    if (normalizeMatchText(color) === removeN) continue
-    const qty = Math.max(1, Number(line.qty) || 1)
-    const idx = next.findIndex((n) => {
-      const sameProduct = n.productId === line.productId
-      return (
-        sameProduct &&
-        normalizeMatchText(n.color || '') === normalizeMatchText(color)
-      )
-    })
-    if (idx >= 0) {
-      next[idx] = {
-        ...next[idx],
-        name: line.name || next[idx].name,
-        color,
-        qty,
-      }
-    } else {
-      next.push({
-        productId: line.productId,
-        name: line.name,
-        color,
-        qty,
-        price: 0,
-      })
-    }
-  }
-  return next
-}
-
-/**
- * Incoming line is a NEW color for a product already in the cart
- * (White in cart + Brown incoming). Same-color restatement (Pink→Pink)
- * is NOT a color change even if the product also has other colors.
- */
-export function incomingIsColorChange(
-  existing: OrderPendingQuotedItem[],
-  incoming: ResolvedCartLine[],
-): boolean {
-  return incoming.some((line) => {
-    if (!line.productId || !line.color) return false
-    const want = normalizeMatchText(line.color)
-    const sameProduct = existing.filter((e) => e.productId === line.productId)
-    if (!sameProduct.length) return false
-    const hasExactColor = sameProduct.some(
-      (e) => normalizeMatchText(e.color || '') === want,
-    )
-    return !hasExactColor
-  })
-}
-
-/**
- * Remove-language + a different-color incoming line → compound color replace
- * (not plain remove, not replace_qty on the old color).
- */
-export function isColorReplaceEdit(args: {
-  burstText: string
-  removeColor: string | null | undefined
-  incoming: ResolvedCartLine[]
-  existing: OrderPendingQuotedItem[]
-}): boolean {
-  const { burstText, existing, incoming } = args
-  const removeColor = canonicalizeExtractedColor(args.removeColor || null)
-  if (!existing.length || !removeColor || !incoming.length) return false
-  const removeN = normalizeMatchText(removeColor)
-  const hasRemoveLine = existing.some(
-    (e) => normalizeMatchText(e.color || '') === removeN,
-  )
-  if (!hasRemoveLine) return false
-  const replacements = incoming.filter((l) => {
-    const c = canonicalizeExtractedColor(l.color)
-    return Boolean(c && normalizeMatchText(c) !== removeN)
-  })
-  if (!replacements.length) return false
-  return (
-    looksLikeColorRemoveRequest(burstText) ||
-    Boolean(parseColorSwapRequest(burstText))
-  )
 }
 
 export function orderItemsToPendingQuoted(
@@ -485,101 +402,209 @@ export function buildColorAskMessage(
 /**
  * Apply cart ops onto pending quoted items (productId-first).
  */
+export type ResolvedCartAction = {
+  type: CartActionType
+  productId: string
+  name: string
+  color: string | null
+  qty: number
+  confidence: number
+  quickReplyId?: string
+  catalogMessageId?: string | null
+}
+
+/**
+ * Apply ordered cart actions left-to-right onto the existing cart.
+ * No coercion: remove then add means remove then add.
+ */
+export function applyCartActionsToPending(
+  existing: OrderPendingQuotedItem[],
+  actions: ResolvedCartAction[],
+): OrderPendingQuotedItem[] {
+  let cart = existing.map((e) => ({ ...e }))
+  let i = 0
+
+  while (i < actions.length) {
+    const a = actions[i]
+
+    if (a.type === 'set') {
+      const batch: ResolvedCartAction[] = []
+      while (i < actions.length && actions[i].type === 'set') {
+        batch.push(actions[i])
+        i++
+      }
+      const next = batch
+        .filter((l) => l.productId && l.color)
+        .map((l) => ({
+          productId: l.productId,
+          name: l.name,
+          color: l.color as string,
+          qty: Math.max(1, Number(l.qty) || 1),
+          price: 0,
+        }))
+      cart = next.length ? next : cart
+      continue
+    }
+
+    if (a.type === 'add') {
+      if (a.productId && a.color) {
+        cart = mergePendingQuotedAdd(cart, [
+          {
+            productId: a.productId,
+            name: a.name,
+            color: a.color,
+            qty: Math.max(1, Number(a.qty) || 1),
+            price: 0,
+          },
+        ])
+      }
+      i++
+      continue
+    }
+
+    if (a.type === 'remove') {
+      const before = cart.length
+      cart = removeLinesMatching(cart, {
+        productId: a.productId || null,
+        color: a.color,
+      })
+      // Wrong bag + right color ("white epa" with bad productId) → color-only
+      if (
+        cart.length === before &&
+        a.productId &&
+        a.color
+      ) {
+        cart = removeLinesMatching(cart, {
+          productId: null,
+          color: a.color,
+        })
+      }
+      i++
+      continue
+    }
+
+    if (a.type === 'set_qty' || a.type === 'add_qty') {
+      let idx = findActionTargetIndex(cart, a)
+      if (idx < 0 && cart.length === 1 && a.productId) {
+        // Same product, any color — only when a single line remains
+        if (cart[0].productId === a.productId) idx = 0
+      }
+      if (idx >= 0) {
+        const delta = Math.max(1, Number(a.qty) || 1)
+        cart[idx] = {
+          ...cart[idx],
+          qty:
+            a.type === 'add_qty'
+              ? Math.max(1, Number(cart[idx].qty) || 1) + delta
+              : delta,
+        }
+      }
+      i++
+      continue
+    }
+
+    i++
+  }
+
+  return cart
+}
+
+/** Drop lines matching productId and/or color. Never deletes an unrelated last bag. */
+export function removeLinesMatching(
+  existing: OrderPendingQuotedItem[],
+  match: { productId?: string | null; color?: string | null },
+): OrderPendingQuotedItem[] {
+  const wantColor = canonicalizeExtractedColor(match.color)
+  const wantPid = match.productId?.trim() || null
+  if (!wantColor && !wantPid) return existing
+
+  const next = existing.filter((e) => {
+    const colorOk = wantColor
+      ? normalizeMatchText(e.color) === normalizeMatchText(wantColor)
+      : true
+    const pidOk = wantPid ? e.productId === wantPid : true
+    // If both specified, both must match to remove; if only color, any bag of that color
+    if (wantPid && wantColor) return !(pidOk && colorOk)
+    if (wantPid) return !pidOk
+    return !colorOk
+  })
+  return next
+}
+
+function findActionTargetIndex(
+  existing: OrderPendingQuotedItem[],
+  action: { productId?: string | null; color?: string | null },
+): number {
+  const wantColor = canonicalizeExtractedColor(action.color)
+  const wantPid = action.productId?.trim() || null
+  return existing.findIndex((e) => {
+    if (wantPid && e.productId !== wantPid) return false
+    if (wantColor) {
+      return normalizeMatchText(e.color) === normalizeMatchText(wantColor)
+    }
+    return Boolean(wantPid)
+  })
+}
+
+/**
+ * @deprecated Prefer applyCartActionsToPending. Kept for unit tests / compat.
+ */
 export function applyCartOperationToPending(
   existing: OrderPendingQuotedItem[],
   incoming: ResolvedCartLine[],
   operation: CartOperation,
   target?: { productId?: string | null; color?: string | null },
 ): OrderPendingQuotedItem[] {
-  const toPending = (lines: ResolvedCartLine[]): OrderPendingQuotedItem[] =>
-    lines
-      .filter((l) => l.productId && l.color)
-      .map((l) => ({
-        productId: l.productId,
-        name: l.name,
-        color: l.color as string,
-        qty: l.qty,
-        price: 0,
-      }))
-
   const op = operation || 'set'
+  const actions: ResolvedCartAction[] = []
 
-  if (op === 'set' || op === 'add') {
-    const next = toPending(incoming)
-    if (op === 'set' || !existing.length) return next.length ? next : existing
-    return mergePendingQuotedAdd(existing, next)
-  }
-
-  if (op === 'add_qty' || op === 'replace_qty' || op === 'remove') {
-    // Apply per incoming line so "Pink 2 + White 1" corrections update
-    // each matching cart row instead of only the first.
-    const lines =
-      incoming.length > 0
-        ? incoming
-        : [
-            {
-              productId: target?.productId || '',
-              name: '',
-              color: target?.color || null,
-              qty: 1,
-              confidence: 1,
-            } satisfies ResolvedCartLine,
-          ]
-
-    let copy = existing.map((e) => ({ ...e }))
-
-    // Color / line remove — never fall back to deleting an unrelated last bag.
-    if (op === 'remove') {
-      let anyRemoved = false
-      for (const line of lines) {
-        let targetIdx = findTargetIndex(copy, target, [line], {
-          forRemove: true,
+  if (op === 'remove') {
+    if (incoming.length) {
+      for (const line of incoming) {
+        actions.push({
+          type: 'remove',
+          productId: target?.productId || line.productId || '',
+          name: line.name,
+          color: canonicalizeExtractedColor(target?.color || line.color),
+          qty: 1,
+          confidence: 1,
         })
-        while (targetIdx >= 0) {
-          copy.splice(targetIdx, 1)
-          anyRemoved = true
-          targetIdx = findTargetIndex(copy, target, [line], { forRemove: true })
-        }
       }
-      if (!anyRemoved) {
-        const removeColors = new Set(
-          [
-            canonicalizeExtractedColor(target?.color),
-            ...lines.map((l) => canonicalizeExtractedColor(l.color)),
-          ].filter((c): c is string => Boolean(c)),
-        )
-        if (removeColors.size) {
-          copy = existing.filter(
-            (e) =>
-              !removeColors.has(canonicalizeExtractedColor(e.color) || ''),
-          )
-        }
-      }
-      return copy
+    } else {
+      actions.push({
+        type: 'remove',
+        productId: target?.productId || '',
+        name: '',
+        color: canonicalizeExtractedColor(target?.color),
+        qty: 1,
+        confidence: 1,
+      })
     }
-
-    for (const line of lines) {
-      let targetIdx = findTargetIndex(copy, target, [line])
-      if (targetIdx < 0 && copy.length === 1) targetIdx = 0
-      if (targetIdx < 0) continue
-
-      const delta = Math.max(1, Number(line.qty) || 1)
-      if (op === 'add_qty') {
-        copy[targetIdx] = {
-          ...copy[targetIdx],
-          qty: Math.max(1, Number(copy[targetIdx].qty) || 1) + delta,
-        }
-      } else {
-        copy[targetIdx] = {
-          ...copy[targetIdx],
-          qty: delta,
-        }
-      }
-    }
-    return copy
+    return applyCartActionsToPending(existing, actions)
   }
 
-  return existing
+  const type: CartActionType =
+    op === 'replace_qty'
+      ? 'set_qty'
+      : op === 'add_qty'
+        ? 'add_qty'
+        : op === 'add'
+          ? 'add'
+          : 'set'
+
+  for (const line of incoming) {
+    actions.push({
+      type,
+      productId: line.productId,
+      name: line.name,
+      color: line.color,
+      qty: line.qty,
+      confidence: line.confidence,
+      quickReplyId: line.quickReplyId,
+      catalogMessageId: line.catalogMessageId,
+    })
+  }
+  return applyCartActionsToPending(existing, actions)
 }
 
 /**
@@ -658,21 +683,12 @@ export function coerceCartOperation(args: {
     pendingLineOverlapsIncoming(existing, incoming)
 
   // Restating desired qty for a bag already in cart must SET, not SUM.
-  // Never coerce when removing/replacing a color — that becomes
-  // replace_qty on the OLD color (White×3 instead of Brown×3).
   if (
     overlaps &&
     absolute &&
     !additive &&
     (op === 'add' || op === 'add_qty')
   ) {
-    if (
-      looksLikeColorRemoveRequest(burstText) ||
-      incomingIsColorChange(existing, incoming) ||
-      Boolean(parseColorSwapRequest(burstText))
-    ) {
-      return op
-    }
     return 'replace_qty'
   }
 
@@ -708,36 +724,6 @@ export function cartExtractMatchesPending(
       Math.max(1, Number(line.qty) || 1) === Math.max(1, Number(e.qty) || 1)
     )
   })
-}
-
-function findTargetIndex(
-  existing: OrderPendingQuotedItem[],
-  target?: { productId?: string | null; color?: string | null },
-  incoming?: ResolvedCartLine[],
-  opts?: { forRemove?: boolean },
-): number {
-  const pid = target?.productId || incoming?.[0]?.productId
-  const color = canonicalizeExtractedColor(
-    target?.color || incoming?.[0]?.color || null,
-  )
-  if (pid) {
-    const byId = existing.findIndex((e) => {
-      if (e.productId !== pid) return false
-      if (!color) return true
-      return normalizeMatchText(e.color) === normalizeMatchText(color)
-    })
-    if (byId >= 0) return byId
-  }
-  // Color-only remove ("white eka epa" / "sudu pata") — match any bag of that color
-  if (opts?.forRemove && color) {
-    const byColor = existing.findIndex(
-      (e) => normalizeMatchText(e.color) === normalizeMatchText(color),
-    )
-    if (byColor >= 0) return byColor
-  }
-  // Never fall back to "last line" on remove — that deletes the wrong bag.
-  if (opts?.forRemove) return -1
-  return existing.length ? existing.length - 1 : -1
 }
 
 /** Customer wants a color removed ("white eka epa", "sudu pata ain"). */
@@ -993,6 +979,187 @@ export function resolveExtractionItems(
   return { lines }
 }
 
+/**
+ * Resolve each extracted action against the catalog (productId / name / mention).
+ * remove may be color-only (no product). Other types need a catalog product.
+ */
+export function resolveCartActions(
+  actions: CartAction[],
+  catalog: MatchableQuickReply[],
+): {
+  actions: ResolvedCartAction[]
+  clarify?: {
+    reason: CartClarifyReason
+    messageParts: MatchableQuickReply[]
+    line?: ResolvedCartLine
+    available?: string[]
+  }
+} {
+  const resolved: ResolvedCartAction[] = []
+  const byId = new Map(
+    catalog.filter((c) => c.product_id).map((c) => [c.product_id as string, c]),
+  )
+
+  for (const action of actions) {
+    // Color-only remove — no product resolution required
+    if (
+      action.type === 'remove' &&
+      !action.productId &&
+      !action.name &&
+      action.color
+    ) {
+      resolved.push({
+        type: 'remove',
+        productId: '',
+        name: '',
+        color: canonicalizeExtractedColor(action.color),
+        qty: 1,
+        confidence: action.confidence,
+      })
+      continue
+    }
+
+    let qr: MatchableQuickReply | null = null
+    let matchConfidence = 0
+    let candidates: MatchableQuickReply[] = []
+
+    if (action.productId && byId.has(action.productId)) {
+      qr = byId.get(action.productId) || null
+      matchConfidence = 0.99
+      candidates = qr ? [qr] : []
+    } else if (action.name) {
+      const want = normalizeMatchText(action.name)
+      const exact = catalog.find(
+        (c) =>
+          normalizeMatchText(c.bagName || productDisplayName(c.title)) === want,
+      )
+      if (exact) {
+        qr = exact
+        matchConfidence = 0.97
+        candidates = [exact]
+      }
+    }
+
+    if (!qr) {
+      const r = resolveMentionedProduct(
+        action.mentioned || action.name || action.color || '',
+        catalog,
+      )
+      qr = r.qr
+      matchConfidence = r.matchConfidence
+      candidates = r.candidates
+    }
+
+    // remove by color still OK if mention didn't resolve to a product
+    if (!qr && action.type === 'remove' && action.color) {
+      resolved.push({
+        type: 'remove',
+        productId: '',
+        name: '',
+        color: canonicalizeExtractedColor(action.color),
+        qty: 1,
+        confidence: action.confidence,
+      })
+      continue
+    }
+
+    if (!qr) {
+      if (candidates.length) {
+        return {
+          actions: [],
+          clarify: { reason: 'ambiguous_product', messageParts: candidates },
+        }
+      }
+      return {
+        actions: [],
+        clarify: { reason: 'unknown_product', messageParts: [] },
+      }
+    }
+
+    const confidence = combineConfidence(action.confidence, matchConfidence)
+    if (confidence < CART_CONFIDENCE_ASK) {
+      return {
+        actions: [],
+        clarify: { reason: 'low_confidence', messageParts: [qr] },
+      }
+    }
+    if (
+      confidence < CART_CONFIDENCE_AUTO &&
+      confidence >= CART_CONFIDENCE_ASK
+    ) {
+      return {
+        actions: [],
+        clarify: {
+          reason: 'ambiguous_product',
+          messageParts: candidates.length ? candidates : [qr],
+        },
+      }
+    }
+
+    const color = canonicalizeExtractedColor(action.color)
+    const colors = qr.colors ?? []
+    let resolvedColor: string | null = color
+    if (color && colors.length && action.type !== 'remove') {
+      const v = validateProductColor(color, colors)
+      if (!v.ok) {
+        return {
+          actions: [],
+          clarify: {
+            reason: 'invalid_color',
+            messageParts: [qr],
+            available: v.available,
+            line: {
+              productId: qr.product_id || '',
+              name: qr.bagName || productDisplayName(qr.title),
+              color,
+              qty: action.qty ?? 1,
+              confidence,
+            },
+          },
+        }
+      }
+      resolvedColor = v.color
+    }
+
+    const qtyRes = validateQty(action.qty, {
+      defaultQty: action.type === 'remove' ? 1 : 1,
+    })
+    if (!qtyRes.ok && action.type !== 'remove') {
+      return {
+        actions: [],
+        clarify: { reason: 'invalid_qty', messageParts: [qr] },
+      }
+    }
+
+    resolved.push({
+      type: action.type,
+      productId: qr.product_id || '',
+      name: qr.bagName || productDisplayName(qr.title),
+      color: resolvedColor,
+      qty: qtyRes.ok ? qtyRes.qty : 1,
+      confidence,
+      quickReplyId: qr.id,
+      catalogMessageId: qr.catalog_message_id,
+    })
+  }
+
+  return { actions: resolved }
+}
+
+/** Short summary for logs / verify prompts. */
+export function formatActionsSummary(actions: ResolvedCartAction[]): string {
+  if (!actions.length) return '(none)'
+  return actions
+    .map((a) => {
+      const bag = a.name || a.productId || 'bag'
+      const color = a.color ? `/${a.color}` : ''
+      const qty =
+        a.type === 'remove' ? '' : ` x${Math.max(1, Number(a.qty) || 1)}`
+      return `${a.type}:${bag}${color}${qty}`
+    })
+    .join('; ')
+}
+
 function pendingToResolved(
   items: OrderPendingQuotedItem[],
 ): ResolvedCartLine[] {
@@ -1194,18 +1361,15 @@ export async function runCartPipeline(args: {
         : []
 
   // After create_order, pending is empty — seed from live order so edits
-  // (color swap / remove / add) start from real order lines.
+  // start from real order lines.
   const recentOrder =
     editOrderEnabled && args.contactPhone
       ? await findRecentOrderForPhone(args.contactPhone)
       : null
-  const colorSwap = burstText.trim()
-    ? parseColorSwapRequest(burstText)
-    : null
   if (
     !existingPending.length &&
     recentOrder &&
-    (args.extraction.intent === 'edit_cart' || colorSwap)
+    args.extraction.intent === 'edit_cart'
   ) {
     const raw = Array.isArray(recentOrder.order.items)
       ? (recentOrder.order.items as Array<{
@@ -1227,133 +1391,11 @@ export async function runCartPipeline(args: {
     qty: it.qty,
   }))
 
-  // Deterministic color swap ("white eken + brown ain") on live order / cart.
-  // Skip when customer also stated a new qty — swap alone keeps old qty;
-  // main extract path does remove + upsert with the stated count.
-  const swapDeferToExtract =
-    looksLikeAbsoluteQtyDesire(burstText) ||
-    isAddToOrderRequest(burstText) ||
-    (args.extraction.items.length > 0 &&
-      args.extraction.items.some(
-        (it) =>
-          it.qty != null &&
-          it.qty > 0 &&
-          canonicalizeExtractedColor(it.color) &&
-          colorSwap &&
-          normalizeMatchText(canonicalizeExtractedColor(it.color) || '') ===
-            normalizeMatchText(colorSwap.want),
-      ))
-
-  if (
-    colorSwap &&
-    existingPending.length &&
-    editOrderEnabled &&
-    recentOrder &&
-    !swapDeferToExtract
-  ) {
-    const swapped = applyColorSwapToPending(existingPending, colorSwap)
-    if (swapped !== existingPending) {
-      const verify = await verifyCartChange({
-        oldItems: oldCartSnapshot,
-        newItems: swapped.map((it) => ({
-          productId: it.productId,
-          name: it.name,
-          color: it.color,
-          qty: it.qty,
-        })),
-        customerText: burstText,
-        operation: 'set',
-        intent: 'edit_cart',
-        useSinglish,
-        config: args.aiConfig,
-        recentCustomerMsgs: args.recentCustomerMsgs,
-      })
-      if (!verify.ok) {
-        await sendClarify(args, verify.message)
-        return {
-          handled: true,
-          quoted: false,
-          clarified: true,
-          updated: false,
-          message: verify.message,
-          clarifyReason: 'verify_failed',
-          verify: {
-            ok: false,
-            source: verify.source,
-            reason: verify.reason,
-            oldItems: oldCartSnapshot.map((i) => ({
-              name: i.name,
-              color: i.color || undefined,
-              qty: i.qty,
-            })),
-            newItems: swapped.map((i) => ({
-              name: i.name,
-              color: i.color || undefined,
-              qty: i.qty,
-            })),
-          },
-        }
-      }
-      const r = await actionUpdateOrderItems({
-        db,
-        accountId: args.accountId,
-        conversationId,
-        contactId: args.contactId,
-        configOwnerUserId: args.configOwnerUserId,
-        contactPhone: args.contactPhone,
-        orderId: recentOrder.id,
-        mode: 'replace',
-        items: swapped.map((l) => ({
-          productId: l.productId || '',
-          name: l.name,
-          color: l.color || '',
-          qty: l.qty,
-          price: l.price || 0,
-          image: l.image,
-        })),
-      })
-      return {
-        handled: r.ok,
-        quoted: false,
-        clarified: false,
-        updated: r.ok,
-        message: r.ok
-          ? `${r.message} (color swap ${colorSwap.remove}→${colorSwap.want}; verified=${verify.source})`
-          : r.message,
-        lines: pendingToResolved(swapped),
-        verify: { ok: true, source: verify.source },
-      }
-    }
-  }
-  if (
-    colorSwap &&
-    existingPending.length &&
-    !recentOrder &&
-    !swapDeferToExtract
-  ) {
-    existingPending = applyColorSwapToPending(existingPending, colorSwap)
-    // Fall through to re-quote with swapped pending
-    args = {
-      ...args,
-      extraction: {
-        intent: 'edit_cart',
-        operation: 'set',
-        items: existingPending.map((it) => ({
-          productId: it.productId || null,
-          name: it.name,
-          mentioned: it.name,
-          qty: it.qty,
-          color: it.color || null,
-          confidence: 1,
-        })),
-        target: { mentioned: null, color: colorSwap.want },
-      },
-    }
-  }
   // Color-only reply ("Black" / "Black color") while a bag awaits color.
   const colorOnly = burstText.trim()
     ? parseColorOnlyReply(burstText)
     : null
+  let colorOnlyFilled = false
   if (colorOnly && pendingMissingColor(existingPending).length) {
     const filled = applyColorOnlyToPending(
       existingPending,
@@ -1378,20 +1420,11 @@ export async function runCartPipeline(args: {
     }
     if (filled.applied) {
       existingPending = filled.items
-      // Continue below with a synthetic edit that quotes/updates the filled cart.
-      args = {
-        ...args,
-        extraction: {
-          intent: 'edit_cart',
-          operation: 'add',
-          items: [],
-          target: { mentioned: null, color: colorOnly },
-        },
-      }
+      colorOnlyFilled = true
     }
   }
 
-  let extraction = args.extraction
+  let extraction = ensureExtractionActions(args.extraction)
 
   // Color-only with nothing pending → not a cart turn
   if (extraction.intent === 'none' && !pendingMissingColor(existingPending).length) {
@@ -1406,19 +1439,7 @@ export async function runCartPipeline(args: {
         message: 'no cart intent',
       }
     }
-    extraction = {
-      intent: 'quotation',
-      operation: 'set',
-      items: heuristicEarly.map((l) => ({
-        productId: l.productId,
-        name: l.name,
-        mentioned: l.name,
-        qty: l.qty,
-        color: l.color,
-        confidence: l.confidence,
-      })),
-      target: { mentioned: null, color: null },
-    }
+    extraction = extractionFromLines('quotation', 'set', heuristicEarly)
   } else if (extraction.intent === 'none') {
     // Pending needs color but message wasn't color-only — leave for tools
     if (!colorOnly) {
@@ -1432,14 +1453,15 @@ export async function runCartPipeline(args: {
     }
     extraction = {
       intent: 'edit_cart',
-      operation: 'add',
+      actions: [],
+      operation: null,
       items: [],
       target: { mentioned: null, color: colorOnly },
     }
   }
 
-  let { lines: resolved, clarify } = resolveExtractionItems(
-    extraction,
+  let { actions: resolvedActions, clarify } = resolveCartActions(
+    extraction.actions,
     productCatalog,
   )
 
@@ -1451,12 +1473,12 @@ export async function runCartPipeline(args: {
       clarify.reason === 'ambiguous_product') &&
     pendingMissingColor(existingPending).length
   ) {
-    const fromItems = extraction.items
+    const fromActions = extraction.actions
       .map((i) => canonicalizeExtractedColor(i.color || i.mentioned))
       .find(Boolean)
     const colorGuess =
       colorOnly ||
-      fromItems ||
+      fromActions ||
       canonicalizeExtractedColor(extraction.target.color) ||
       (burstText ? parseColorOnlyReply(burstText) : null)
     if (colorGuess) {
@@ -1467,36 +1489,62 @@ export async function runCartPipeline(args: {
       )
       if (filled.applied) {
         existingPending = filled.items
-        resolved = []
+        resolvedActions = []
         clarify = undefined
+        colorOnlyFilled = true
       }
     }
   }
 
-  // Heuristic fallback when extract failed to resolve products
+  // Heuristic fallback when extract failed to resolve products (quotation)
   if (
     (clarify?.reason === 'unknown_product' ||
-      (!resolved.length && extraction.items.length > 0)) &&
-    burstText.trim()
+      (!resolvedActions.length && extraction.actions.length > 0)) &&
+    burstText.trim() &&
+    extraction.intent === 'quotation'
   ) {
     const heuristic = heuristicLinesFromText(burstText, productCatalog)
     if (heuristic.length) {
-      resolved = heuristic
+      resolvedActions = heuristic.map((l) => ({
+        type: 'set' as const,
+        productId: l.productId,
+        name: l.name,
+        color: l.color,
+        qty: l.qty,
+        confidence: l.confidence,
+        quickReplyId: l.quickReplyId,
+        catalogMessageId: l.catalogMessageId,
+      }))
       clarify = undefined
     }
   }
 
-  // Also use heuristic when extract returned quotation/edit with empty items
-  // but the burst clearly names bags (e.g. LLM dropped "cloudy").
+  // Quotation/edit with empty actions but burst names bags
   if (
     !clarify &&
-    !resolved.length &&
+    !resolvedActions.length &&
+    !colorOnlyFilled &&
     !pendingMissingColor(existingPending).length &&
     (extraction.intent === 'quotation' || extraction.intent === 'edit_cart') &&
     burstText.trim()
   ) {
     const heuristic = heuristicLinesFromText(burstText, productCatalog)
-    if (heuristic.length) resolved = heuristic
+    if (heuristic.length) {
+      const type: CartActionType =
+        extraction.intent === 'edit_cart' && existingPending.length
+          ? 'add'
+          : 'set'
+      resolvedActions = heuristic.map((l) => ({
+        type,
+        productId: l.productId,
+        name: l.name,
+        color: l.color,
+        qty: l.qty,
+        confidence: l.confidence,
+        quickReplyId: l.quickReplyId,
+        catalogMessageId: l.catalogMessageId,
+      }))
+    }
   }
 
   if (clarify) {
@@ -1539,108 +1587,81 @@ export async function runCartPipeline(args: {
     }
   }
 
-  // Color replace ("White epa + brown 3k") — use extract lines only (before
-  // photo-merge), remove target color, upsert replacement with absolute qty.
-  // Must run before coerce/remove or photo-merge turns this into replace_qty
-  // on the old White line.
-  const removeColorHint =
-    canonicalizeExtractedColor(extraction.target.color) ||
-    pickRemoveColorFromText(burstText) ||
-    parseColorSwapRequest(burstText)?.remove ||
-    null
-  const colorReplace =
-    existingPending.length > 0 &&
-    isColorReplaceEdit({
-      burstText,
-      removeColor: removeColorHint,
-      incoming: resolved,
-      existing: existingPending,
-    })
-
-  // Photo bags saved by early identify must not be wiped when extract only
-  // returns the named bag ("this bag and puff Pink 2" → keep Mini + Puff).
-  // Keep photo bags when extract only returned the named bag — but never on
-  // remove (would turn "remove white" into remove Mini+White targets),
-  // and never on color-replace (would poison coerce via unrelated overlaps).
+  // Photo bags: only for pure `set` / quotation — merge omitted identify lines
+  // into the set batch. Never merge into remove/add/set_qty (poisons overlaps).
+  const onlySet =
+    resolvedActions.length > 0 &&
+    resolvedActions.every((a) => a.type === 'set')
   if (
-    !colorReplace &&
+    onlySet &&
     existingPending.length &&
-    resolved.length &&
-    extraction.operation !== 'remove' &&
     (extraction.intent === 'quotation' || extraction.intent === 'edit_cart')
   ) {
-    resolved = mergePhotoPendingIntoResolved(existingPending, resolved)
+    const asLines: ResolvedCartLine[] = resolvedActions.map((a) => ({
+      productId: a.productId,
+      name: a.name,
+      color: a.color,
+      qty: a.qty,
+      confidence: a.confidence,
+      quickReplyId: a.quickReplyId,
+      catalogMessageId: a.catalogMessageId,
+    }))
+    const merged = mergePhotoPendingIntoResolved(existingPending, asLines)
+    resolvedActions = merged.map((l) => ({
+      type: 'set' as const,
+      productId: l.productId,
+      name: l.name,
+      color: l.color,
+      qty: l.qty,
+      confidence: l.confidence,
+      quickReplyId: l.quickReplyId,
+      catalogMessageId: l.catalogMessageId,
+    }))
   }
 
-  let operation: CartOperation = colorReplace
-    ? 'set'
-    : coerceCartOperation({
-        burstText,
-        operation: extraction.operation,
-        intent: extraction.intent,
-        existing: existingPending,
-        incoming: resolved,
-      })
-  // Pure remove only — do not force remove when a replacement color is present
-  if (
-    !colorReplace &&
-    looksLikeColorRemoveRequest(burstText) &&
-    (operation === 'add' ||
-      operation === 'set' ||
-      operation === 'replace_qty' ||
-      operation === 'add_qty' ||
-      !operation)
-  ) {
-    operation = 'remove'
-  }
-  // Resolve target productId from extraction.target
-  let targetPid: string | null = null
-  if (extraction.target.mentioned) {
-    const t = resolveMentionedProduct(extraction.target.mentioned, productCatalog)
-    targetPid = t.qr?.product_id || null
-  }
+  const actionsSummary = formatActionsSummary(resolvedActions)
+  const operation: CartOperation =
+    deriveCompatFromActions(
+      resolvedActions.map((a) => ({
+        type: a.type,
+        productId: a.productId || null,
+        name: a.name || null,
+        mentioned: a.name,
+        qty: a.qty,
+        color: a.color,
+        confidence: a.confidence,
+      })),
+    ).operation
 
-  // Color-only fill already applied → use pending as working set
-  let nextPending: OrderPendingQuotedItem[]
-  if (
-    colorOnly &&
-    existingPending.length &&
-    !pendingMissingColor(existingPending).length &&
-    !resolved.length
-  ) {
-    nextPending = existingPending
-  } else if (colorReplace && removeColorHint) {
-    const replacementLines = resolved.filter((l) => {
-      const c = canonicalizeExtractedColor(l.color)
-      return Boolean(
-        c &&
-          normalizeMatchText(c) !== normalizeMatchText(removeColorHint),
-      )
-    })
-    nextPending = applyColorReplaceToPending(
-      existingPending,
-      replacementLines,
-      removeColorHint,
-    )
-  } else {
-    nextPending = applyCartOperationToPending(
-      existingPending,
-      resolved,
-      operation,
-      {
-        productId: targetPid,
-        color: extraction.target.color || colorOnly,
-      },
-    )
-  }
+  // Color-only fill already applied with no further actions → quote pending as-is
+  const nextPending =
+    colorOnlyFilled && !resolvedActions.length
+      ? existingPending
+      : resolvedActions.length
+        ? applyCartActionsToPending(existingPending, resolvedActions)
+        : existingPending
 
   const workingLines =
     nextPending.length > 0
       ? pendingToResolved(nextPending)
-      : resolved
+      : resolvedActions
+          .filter((a) => a.type !== 'remove')
+          .map((a) => ({
+            productId: a.productId,
+            name: a.name,
+            color: a.color,
+            qty: a.qty,
+            confidence: a.confidence,
+            quickReplyId: a.quickReplyId,
+            catalogMessageId: a.catalogMessageId,
+          }))
 
   // Remove left nothing — don't invent a new quote / don't double-add
-  if (operation === 'remove' && !workingLines.length) {
+  if (
+    resolvedActions.some((a) => a.type === 'remove') &&
+    !resolvedActions.some((a) => a.type === 'add' || a.type === 'set') &&
+    !workingLines.length
+  ) {
     const text = useSinglish
       ? 'White/color eka ain kala — cart eka empty una. Thawa bags thiyenawada?'
       : 'That color was removed and the cart is empty. Any bags left to quote?'
@@ -1776,6 +1797,7 @@ export async function runCartPipeline(args: {
       newItems: newSnap,
       customerText: burstText,
       operation,
+      actionsSummary,
       intent: extraction.intent,
       useSinglish,
       config: args.aiConfig,
@@ -1803,120 +1825,21 @@ export async function runCartPipeline(args: {
     }
   }
 
-  // Live order edit path
+  // Live order edit path — workingLines is the FULL cart after actions; always replace.
   if (extraction.intent === 'edit_cart' && editOrderEnabled) {
     const recent = recentOrder || (await findRecentOrderForPhone(args.contactPhone))
     if (recent) {
-      const mode =
-        operation === 'set' || operation === 'replace_qty'
-          ? ('replace' as const)
-          : ('add' as const)
-
-      if (operation === 'remove') {
-        const orderItems = (
-          Array.isArray(recent.order.items) ? recent.order.items : []
-        ) as Array<{
-          productId?: string
-          name?: string
-          color?: string
-          quantity?: number
-          price?: number
-          image?: string
-        }>
-        const remaining = orderItems.filter((o) => {
-          const hit = workingLines.find(
-            (l) =>
-              l.productId &&
-              l.productId === o.productId &&
-              (!l.color ||
-                normalizeMatchText(l.color) ===
-                  normalizeMatchText(String(o.color || ''))),
-          )
-          return !hit
-        })
-        if (!remaining.length) {
-          const text = useSinglish
-            ? 'Order eke bags remove karanna bari — human agent ekekata kiyanna.'
-            : 'Could not remove those bags — please ask a human agent.'
-          await sendClarify(args, text)
-          return {
-            handled: true,
-            quoted: false,
-            clarified: true,
-            updated: false,
-            message: text,
-          }
-        }
-        const remainingSnap: CartLineSnapshot[] = remaining.map((it) => ({
-          productId: typeof it.productId === 'string' ? it.productId : undefined,
-          name: String(it.name || 'Bag'),
-          color: String(it.color || ''),
-          qty: Math.max(1, Number(it.quantity) || 1),
-        }))
-        const removeVerify = await verifyCartChange({
-          oldItems: oldCartSnapshot,
-          newItems: remainingSnap,
-          customerText: burstText,
-          operation: 'remove',
-          intent: 'edit_cart',
-          useSinglish,
-          config: args.aiConfig,
-          recentCustomerMsgs: args.recentCustomerMsgs,
-        })
-        if (!removeVerify.ok) {
-          await sendClarify(args, removeVerify.message)
-          return {
-            handled: true,
-            quoted: false,
-            clarified: true,
-            updated: false,
-            message: removeVerify.message,
-            clarifyReason: 'verify_failed',
-            verify: {
-              ok: false,
-              source: removeVerify.source,
-              reason: removeVerify.reason,
-              oldItems: oldCartSnapshot.map((i) => ({
-                name: i.name,
-                color: i.color || undefined,
-                qty: i.qty,
-              })),
-              newItems: remainingSnap.map((i) => ({
-                name: i.name,
-                color: i.color || undefined,
-                qty: i.qty,
-              })),
-            },
-          }
-        }
-        const r = await actionUpdateOrderItems({
-          db,
-          accountId: args.accountId,
-          conversationId,
-          contactId: args.contactId,
-          configOwnerUserId: args.configOwnerUserId,
-          contactPhone: args.contactPhone,
-          orderId: recent.id,
-          mode: 'replace',
-          items: remaining.map((it) => ({
-            productId: String(it.productId || ''),
-            name: String(it.name || ''),
-            color: String(it.color || ''),
-            qty: Math.max(1, Number(it.quantity) || 1),
-            price: Number(it.price) || 0,
-            image: typeof it.image === 'string' ? it.image : undefined,
-          })),
-        })
+      if (!workingLines.length) {
+        const text = useSinglish
+          ? 'Order eke bags remove karanna bari — human agent ekekata kiyanna.'
+          : 'Could not remove those bags — please ask a human agent.'
+        await sendClarify(args, text)
         return {
-          handled: r.ok,
+          handled: true,
           quoted: false,
-          clarified: false,
-          updated: r.ok,
-          message: r.ok
-            ? `${r.message} (verified=${removeVerify.source})`
-            : r.message,
-          lines: workingLines,
-          verify: { ok: true, source: removeVerify.source },
+          clarified: true,
+          updated: false,
+          message: text,
         }
       }
 
@@ -1928,7 +1851,7 @@ export async function runCartPipeline(args: {
         configOwnerUserId: args.configOwnerUserId,
         contactPhone: args.contactPhone,
         orderId: recent.id,
-        mode,
+        mode: 'replace',
         items: workingLines.map((l) => ({
           productId: l.productId,
           name: l.name,
@@ -1943,7 +1866,7 @@ export async function runCartPipeline(args: {
         clarified: false,
         updated: r.ok,
         message: r.ok
-          ? `${r.message}${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
+          ? `${r.message} [${actionsSummary}]${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
           : r.message,
         lines: workingLines,
         verify: verifyMeta,
@@ -2023,7 +1946,7 @@ export async function runCartPipeline(args: {
       clarified: false,
       updated: r.ok,
       message: r.ok
-        ? `Updated quotation (replace${operation ? `/${operation}` : ''}): ${r.message}${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
+        ? `Updated quotation [${actionsSummary}]: ${r.message}${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
         : r.message,
       lines: workingLines,
       verify: verifyMeta,
