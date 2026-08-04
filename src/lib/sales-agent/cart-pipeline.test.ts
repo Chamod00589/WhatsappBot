@@ -405,6 +405,84 @@ describe('cart ops + completeness', () => {
     ).toBe('add')
   })
 
+  it('does not double qty when thawa quotation matches identify pending', () => {
+    const existing = [
+      {
+        productId: 'shoulder-1',
+        name: 'Shoulder Bag',
+        color: 'Red',
+        qty: 2,
+        price: 850,
+      },
+      {
+        productId: 'cloudy-1',
+        name: 'Cloudy Shoulder Bag',
+        color: 'White',
+        qty: 1,
+        price: 990,
+      },
+    ]
+    const incoming: ResolvedCartLine[] = [
+      {
+        productId: 'shoulder-1',
+        name: 'Shoulder Bag',
+        color: 'Red',
+        qty: 2,
+        confidence: 1,
+      },
+      {
+        productId: 'cloudy-1',
+        name: 'Cloudy Shoulder Bag',
+        color: 'White',
+        qty: 1,
+        confidence: 1,
+      },
+    ]
+    const burst = 'Mata me bag 2k oni. Thawa cloudy white ekak oni'
+    expect(
+      coerceCartOperation({
+        burstText: burst,
+        operation: 'set',
+        intent: 'quotation',
+        existing,
+        incoming,
+      }),
+    ).toBe('set')
+
+    const next = applyCartOperationToPending(existing, incoming, 'set')
+    expect(next).toHaveLength(2)
+    expect(next.find((l) => l.productId === 'shoulder-1')?.qty).toBe(2)
+    expect(next.find((l) => l.productId === 'cloudy-1')?.qty).toBe(1)
+  })
+
+  it('still adds when thawa only names a new bag not already pending', () => {
+    expect(
+      coerceCartOperation({
+        burstText: 'Thawa cloudy white ekak oni',
+        operation: 'set',
+        intent: 'quotation',
+        existing: [
+          {
+            productId: 'shoulder-1',
+            name: 'Shoulder Bag',
+            color: 'Red',
+            qty: 2,
+            price: 850,
+          },
+        ],
+        incoming: [
+          {
+            productId: 'cloudy-1',
+            name: 'Cloudy Shoulder Bag',
+            color: 'White',
+            qty: 1,
+            confidence: 1,
+          },
+        ],
+      }),
+    ).toBe('add')
+  })
+
   it('remove drops the target line', () => {
     const existing = [
       {

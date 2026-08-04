@@ -365,12 +365,38 @@ export function coerceCartOperation(args: {
     return 'replace_qty'
   }
 
-  // Explicit "ekakuth / thawa / add" keeps additive merge.
+  // Explicit "ekakuth / thawa / add" keeps additive merge —
+  // BUT not when extract already listed the full cart matching pending
+  // (same-turn identify saved 2+1, extract set 2+1, "thawa" must not SUM → 4+2).
   if (additive && (op === 'set' || op === 'replace_qty')) {
+    if (op === 'set' && cartExtractMatchesPending(existing, incoming)) {
+      return 'set'
+    }
     return 'add'
   }
 
   return op
+}
+
+/** Extract restated the same lines+qtys already in pending (idempotent set). */
+export function cartExtractMatchesPending(
+  existing: OrderPendingQuotedItem[],
+  incoming: ResolvedCartLine[],
+): boolean {
+  if (!existing.length || !incoming.length) return false
+  if (existing.length !== incoming.length) return false
+  return existing.every((e) => {
+    const wantColor = normalizeMatchText(e.color || '')
+    const line = incoming.find((l) => {
+      if (!l.productId || l.productId !== e.productId) return false
+      if (!wantColor) return true
+      return normalizeMatchText(l.color || '') === wantColor
+    })
+    if (!line) return false
+    return (
+      Math.max(1, Number(line.qty) || 1) === Math.max(1, Number(e.qty) || 1)
+    )
+  })
 }
 
 function findTargetIndex(
