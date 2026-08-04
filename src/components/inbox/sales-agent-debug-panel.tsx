@@ -41,6 +41,7 @@ interface RunRow {
       totalTokens?: number
     } | null
     error?: string
+    last_phase?: string
   }
   created_at: string
   finished_at: string | null
@@ -176,6 +177,14 @@ export function SalesAgentDebugPanel({
                           <span className="text-muted-foreground">
                             {formatTime(run.created_at)}
                           </span>
+                          {run.status === 'running' ? (
+                            <span className="text-amber-700 dark:text-amber-300">
+                              {formatElapsed(run.created_at)}
+                              {run.payload.last_phase
+                                ? ` · ${run.payload.last_phase}`
+                                : ''}
+                            </span>
+                          ) : null}
                           <span className="text-muted-foreground">
                             {run.content_type || '—'}
                           </span>
@@ -185,6 +194,14 @@ export function SalesAgentDebugPanel({
                             </span>
                           ) : null}
                         </div>
+                        {run.status === 'running' &&
+                        (run.payload.steps?.length ?? 0) > 0 ? (
+                          <p className="mt-0.5 truncate text-sky-700 dark:text-sky-300">
+                            Last:{' '}
+                            {run.payload.steps![run.payload.steps!.length - 1]
+                              ?.detail || run.payload.last_phase}
+                          </p>
+                        ) : null}
                         {run.inbound_text ? (
                           <p className="mt-0.5 truncate text-foreground/80">
                             “{run.inbound_text}”
@@ -204,6 +221,20 @@ export function SalesAgentDebugPanel({
                             Paste into chat for troubleshooting
                           </span>
                         </div>
+
+                        {run.status === 'running' ? (
+                          <p className="rounded bg-amber-500/10 px-2 py-1 text-amber-800 dark:text-amber-200">
+                            Still running
+                            {run.payload.last_phase
+                              ? ` — phase: ${run.payload.last_phase}`
+                              : ''}
+                            {` (${formatElapsed(run.created_at)})`}. Steps
+                            update live every few seconds.
+                            {(run.payload.steps?.length ?? 0) === 0
+                              ? ' Waiting for first progress flush…'
+                              : ''}
+                          </p>
+                        ) : null}
 
                         {run.inbound_text ? (
                           <Section
@@ -604,6 +635,19 @@ function formatTime(iso: string): string {
     })
   } catch {
     return iso
+  }
+}
+
+function formatElapsed(iso: string): string {
+  try {
+    const ms = Date.now() - new Date(iso).getTime()
+    if (!Number.isFinite(ms) || ms < 0) return '…'
+    const s = Math.floor(ms / 1000)
+    if (s < 60) return `${s}s`
+    const m = Math.floor(s / 60)
+    return `${m}m ${s % 60}s`
+  } catch {
+    return '…'
   }
 }
 

@@ -103,6 +103,24 @@ export async function dispatchSalesAgentNow(
         Object.keys(args.referral).length > 0,
     ),
   })
+  await log.flushNow()
+
+  // Fail the debug run if the whole dispatch hangs (e.g. catalog API).
+  const DISPATCH_WATCHDOG_MS = 150_000
+  let dispatchSettled = false
+  const watchdog = setTimeout(() => {
+    if (dispatchSettled) return
+    console.error(
+      '[sales-agent] dispatch watchdog — still running after',
+      DISPATCH_WATCHDOG_MS,
+      'ms',
+    )
+    void log.fail(
+      new Error(
+        `Sales Agent hung after ${Math.round(DISPATCH_WATCHDOG_MS / 1000)}s (last phase may show where it stuck)`,
+      ),
+    )
+  }, DISPATCH_WATCHDOG_MS)
 
   try {
     const baseConfig = await loadAiConfig(db, accountId)
@@ -461,6 +479,7 @@ export async function dispatchSalesAgentNow(
                 : 'no identify match',
           identifyPayload,
         )
+        await log.flushNow()
 
         if (idResult.identified.length) {
           const photoLines = idResult.identified
@@ -563,6 +582,7 @@ export async function dispatchSalesAgentNow(
     ) {
       try {
         log.step('cart_extract', 'Extracting cart intent (JSON only)')
+        await log.flushNow()
         const extracted = await extractCartIntent({
           config,
           messages: loopMessages,
@@ -889,6 +909,9 @@ export async function dispatchSalesAgentNow(
       /* ignore secondary failures */
     }
     await log.fail(err)
+  } finally {
+    dispatchSettled = true
+    clearTimeout(watchdog)
   }
 }
 

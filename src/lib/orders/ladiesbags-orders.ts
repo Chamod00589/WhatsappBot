@@ -76,6 +76,12 @@ export async function ladiesbagsOrdersRequest(
     headers,
     body: options?.body != null ? JSON.stringify(options.body) : undefined,
     cache: 'no-store',
+    // Avoid hanging the WhatsApp sales agent forever on a dead catalog API.
+    signal: AbortSignal.timeout(
+      Number(process.env.LADIESBAGS_ORDERS_TIMEOUT_MS) > 0
+        ? Number(process.env.LADIESBAGS_ORDERS_TIMEOUT_MS)
+        : 20_000,
+    ),
   })
 
   const json = await parseJson(res)

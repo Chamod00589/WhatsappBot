@@ -31,11 +31,14 @@ export interface SalesAgentRunPayload {
     totalTokens?: number
   } | null
   error?: string
+  /** Last phase label for the inbox while status=running. */
+  last_phase?: string
 }
 
 /**
  * Mutable debug recorder for one Sales Agent dispatch.
- * Persist with finish() — never throws (troubleshoot must not break bot).
+ * Flushes steps to DB while running so the inbox can show live progress.
+ * Persist helpers never throw (troubleshoot must not break bot).
  */
 export class SalesAgentRunLogger {
   private id: string | null = null
@@ -43,6 +46,9 @@ export class SalesAgentRunLogger {
   private payload: SalesAgentRunPayload = { steps: [] }
   private status: SalesAgentRunStatus = 'running'
   private skipReason: string | null = null
+  private flushTimer: ReturnType<typeof setTimeout> | null = null
+  private flushInFlight: Promise<void> | null = null
+  private flushQueued = false
 
   constructor(
     private db: SupabaseClient,
@@ -63,11 +69,14 @@ export class SalesAgentRunLogger {
       ...(data !== undefined ? { data } : {}),
     })
     this.payload.steps = this.steps
+    this.payload.last_phase = phase
+    this.scheduleFlush()
   }
 
   set(partial: Partial<SalesAgentRunPayload>): void {
     Object.assign(this.payload, partial)
     this.payload.steps = this.steps
+    this.scheduleFlush()
   }
 
   /** Create the DB row early so the inbox can show "running". */
@@ -100,27 +109,81 @@ export class SalesAgentRunLogger {
     this.status = 'skipped'
     this.skipReason = reason
     this.step('gate', detail || reason, { reason })
-    await this.persist()
+    await this.persistFinal()
   }
 
   async fail(err: unknown): Promise<void> {
+    if (this.status === 'completed' || this.status === 'skipped') return
     this.status = 'failed'
     const message = err instanceof Error ? err.message : String(err)
     this.payload.error = message
     this.step('error', message)
-    await this.persist()
+    await this.persistFinal()
   }
 
   async complete(): Promise<void> {
+    // Prefer completed even if the watchdog already marked hung/failed.
     this.status = 'completed'
-    await this.persist()
+    await this.persistFinal()
   }
 
-  private async persist(): Promise<void> {
+  /** Force a progress write (e.g. right after identify QR). */
+  async flushNow(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+    if (this.status === 'running') {
+      await this.flushProgress()
+    }
+  }
+
+  /** Debounced mid-run flush (keeps finished_at null). */
+  private scheduleFlush(): void {
+    if (this.status !== 'running') return
+    if (this.flushTimer) clearTimeout(this.flushTimer)
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null
+      void this.flushProgress()
+    }, 250)
+  }
+
+  private async flushProgress(): Promise<void> {
+    if (this.status !== 'running') return
+    if (this.flushInFlight) {
+      this.flushQueued = true
+      return
+    }
+    this.flushInFlight = this.persist({ finished: false }).finally(() => {
+      this.flushInFlight = null
+      if (this.flushQueued) {
+        this.flushQueued = false
+        void this.flushProgress()
+      }
+    })
+    await this.flushInFlight
+  }
+
+  private async persistFinal(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+    if (this.flushInFlight) {
+      try {
+        await this.flushInFlight
+      } catch {
+        /* ignore */
+      }
+    }
+    await this.persist({ finished: true })
+  }
+
+  private async persist(opts: { finished: boolean }): Promise<void> {
     this.payload.steps = this.steps
     try {
       if (!this.id) {
-        // start() failed earlier — try a one-shot insert
+        if (!opts.finished) return
         await this.db.from('sales_agent_runs').insert({
           account_id: this.meta.accountId,
           conversation_id: this.meta.conversationId,
@@ -134,15 +197,15 @@ export class SalesAgentRunLogger {
         })
         return
       }
-      await this.db
-        .from('sales_agent_runs')
-        .update({
-          status: this.status,
-          skip_reason: this.skipReason,
-          payload: this.payload,
-          finished_at: new Date().toISOString(),
-        })
-        .eq('id', this.id)
+      const patch: Record<string, unknown> = {
+        status: this.status,
+        skip_reason: this.skipReason,
+        payload: this.payload,
+      }
+      if (opts.finished) {
+        patch.finished_at = new Date().toISOString()
+      }
+      await this.db.from('sales_agent_runs').update(patch).eq('id', this.id)
     } catch (err) {
       console.warn('[sales-agent-debug] persist failed:', err)
     }

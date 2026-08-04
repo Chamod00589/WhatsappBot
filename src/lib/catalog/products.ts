@@ -99,6 +99,7 @@ export async function fetchCatalogQuickMessages(
     cache: lite ? 'default' : 'no-store',
     next: lite ? { revalidate: 120 } : undefined,
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(20_000),
   })
   if (!res.ok) {
     throw new Error(`Quick messages fetch failed (HTTP ${res.status})`)
@@ -144,6 +145,7 @@ export async function fetchCatalogProducts(base = catalogBaseUrl()): Promise<Cat
   const res = await fetch(`${base}/api/products`, {
     cache: 'no-store',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(20_000),
   })
   if (!res.ok) throw new Error(`Catalog fetch failed (HTTP ${res.status})`)
   const data = await res.json()
