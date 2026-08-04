@@ -569,7 +569,7 @@ async function callVerifyModel(
           /* try next */
         }
       }
-      if (shouldSuggestOpenRouterZdrFallback(err)) {
+      if (shouldSuggestOpenRouterZdrFallback(primaryModel)) {
         try {
           return await callOnce(OPENROUTER_ZDR_FALLBACK_MODEL, primaryKey, false)
         } catch {

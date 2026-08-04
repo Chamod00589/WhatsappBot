@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { NextIntlClientProvider } from 'next-intl';
 import { getLocale, getMessages } from 'next-intl/server';
-import { Inter } from "next/font/google";
+import localFont from "next/font/local";
 import Script from "next/script";
 import "./globals.css";
 import { ThemeProvider } from "@/hooks/use-theme";
@@ -15,9 +15,22 @@ import {
   THEME_IDS,
 } from "@/lib/themes";
 
-const inter = Inter({
+/** Bundled font — avoids next/font/google network fetch at build time. */
+const sans = localFont({
+  src: [
+    {
+      path: "../../assets/fonts/NotoSans-Regular.ttf",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "../../assets/fonts/NotoSans-Bold.ttf",
+      weight: "700",
+      style: "normal",
+    },
+  ],
   variable: "--font-sans",
-  subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -97,7 +110,7 @@ export default async function RootLayout({
       lang={locale}
       data-theme={DEFAULT_THEME}
       data-mode={DEFAULT_MODE}
-      className={`${inter.variable} h-full antialiased`}
+      className={`${sans.variable} h-full antialiased`}
       // The `theme-boot` script below rewrites `data-theme` and
       // `data-mode` on <html> from localStorage before React hydrates,
       // so for any non-default choice the client DOM intentionally

@@ -15,15 +15,13 @@ export const FG = '#e9edef'
 export const FONT = 'Noto Sans'
 
 function resolveFontDir(): string {
-  const candidates = [
-    path.join(process.cwd(), 'assets', 'fonts'),
-    path.join(__dirname, '..', '..', '..', '..', 'assets', 'fonts'),
-    path.join(__dirname, '..', '..', '..', 'assets', 'fonts'),
-  ]
-  for (const dir of candidates) {
-    if (fs.existsSync(path.join(dir, 'NotoSans-Regular.ttf'))) return dir
-  }
-  return candidates[0]
+  // Keep font lookup scoped so Turbopack does not NFT-trace the whole repo.
+  const root = /* turbopackIgnore: true */ process.cwd()
+  const primary = path.join(root, 'assets', 'fonts')
+  if (fs.existsSync(path.join(primary, 'NotoSans-Regular.ttf'))) return primary
+  const fromModule = path.join(__dirname, '..', '..', '..', 'assets', 'fonts')
+  if (fs.existsSync(path.join(fromModule, 'NotoSans-Regular.ttf'))) return fromModule
+  return primary
 }
 
 function loadFontFiles(): string[] {
