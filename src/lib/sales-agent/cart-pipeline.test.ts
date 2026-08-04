@@ -12,6 +12,7 @@ import {
   heuristicLinesFromText,
   looksLikeAbsoluteQtyDesire,
   looksLikeColorRemoveRequest,
+  mergeDuplicatePendingLines,
   mergePhotoPendingIntoResolved,
   parseColorSwapRequest,
   resolveCartActions,
@@ -404,6 +405,85 @@ describe('color + qty validation', () => {
   it('rejects crazy qty', () => {
     expect(validateQty(200).ok).toBe(false)
     expect(validateQty(2).ok).toBe(true)
+  })
+})
+
+describe('validateProductColor variants', () => {
+  it('does not collapse White_2 into White via substring soft-match', () => {
+    const v = validateProductColor('White_2', ['White', 'White_2', 'Black'])
+    expect(v.ok).toBe(true)
+    if (v.ok) expect(v.color).toBe('White_2')
+  })
+
+  it('still matches Dark-Brown to dark brown', () => {
+    const v = validateProductColor('dark brown', ['Dark-Brown', 'Black'])
+    expect(v.ok).toBe(true)
+    if (v.ok) expect(v.color).toBe('Dark-Brown')
+  })
+})
+
+describe('edit_cart add onto live order base (msg11 regression)', () => {
+  it('adds photo bag onto live order lines without wiping them', () => {
+    const liveOrder = [
+      {
+        productId: 'bloom-1',
+        name: 'Bloom Shoulder Bag',
+        color: 'White',
+        qty: 2,
+        price: 1200,
+      },
+      {
+        productId: 'cloudy-1',
+        name: 'Cloudy Shoulder Bag',
+        color: 'White',
+        qty: 1,
+        price: 2500,
+      },
+    ]
+    // Identify wrongly sat alone in pending as White_2; extract adds White
+    const { actions } = resolveCartActions(
+      parseCartIntentJson({
+        intent: 'edit_cart',
+        actions: [
+          {
+            type: 'add',
+            productId: 'mini-1',
+            name: 'Mini Shoulder Bag',
+            mentioned: 'Me bag eka',
+            color: 'White',
+            qty: 1,
+            confidence: 0.97,
+          },
+        ],
+      }).actions,
+      catalogFixture(),
+    )
+    const next = applyCartActionsToPending(liveOrder, actions)
+    expect(next).toHaveLength(3)
+    expect(next.find((l) => l.productId === 'bloom-1')?.qty).toBe(2)
+    expect(next.find((l) => l.productId === 'cloudy-1')?.qty).toBe(1)
+    expect(next.find((l) => l.productId === 'mini-1')?.color).toBe('White')
+  })
+
+  it('merges duplicate product+color after White_2/White style rows', () => {
+    const merged = mergeDuplicatePendingLines([
+      {
+        productId: 'puff-1',
+        name: 'Puff',
+        color: 'White',
+        qty: 1,
+        price: 0,
+      },
+      {
+        productId: 'puff-1',
+        name: 'Puff',
+        color: 'White',
+        qty: 1,
+        price: 0,
+      },
+    ])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].qty).toBe(2)
   })
 })
 

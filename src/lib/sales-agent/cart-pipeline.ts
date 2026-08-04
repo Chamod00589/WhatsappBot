@@ -262,7 +262,13 @@ export function canonicalizeExtractedColor(
   raw: string | null | undefined,
 ): string | null {
   if (!raw || !String(raw).trim()) return null
-  const n = normalizeMatchText(raw)
+  let n = normalizeMatchText(raw)
+  if (!n) return null
+  // "Black color" / "sudu pata" → bare color token
+  n = n
+    .replace(/\b(colors?|colours?|pata|peta)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
   if (!n) return null
   const alias = COLOR_ALIASES[n.replace(/\s+/g, '')] || COLOR_ALIASES[n]
   const base = alias || n
@@ -285,14 +291,26 @@ export function validateProductColor(
   const want = normalizeMatchText(color)
   const hit = avail.find((c) => normalizeMatchText(c) === want)
   if (hit) return { ok: true, color: hit }
-  // Soft match: "dark brown" vs "Dark-Brown"
+
+  // Soft match: normalize separators only ("dark brown" ↔ "Dark-Brown" / "Dark_Brown").
+  // Do NOT use substring includes — that maps White_2 → White incorrectly.
+  const wantNorm = want.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
   const soft = avail.find((c) => {
-    const cn = normalizeMatchText(c).replace(/-/g, ' ')
-    const wn = want.replace(/-/g, ' ')
-    return cn === wn || cn.includes(wn) || wn.includes(cn)
+    const cn = normalizeMatchText(c)
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return cn === wantNorm
   })
   if (soft) return { ok: true, color: soft }
   return { ok: false, available: avail }
+}
+
+/** Collapse duplicate productId+color rows (sum qty). */
+export function mergeDuplicatePendingLines(
+  items: OrderPendingQuotedItem[],
+): OrderPendingQuotedItem[] {
+  return mergePendingQuotedAdd([], items)
 }
 
 export function validateQty(
@@ -1360,17 +1378,15 @@ export async function runCartPipeline(args: {
           ]
         : []
 
-  // After create_order, pending is empty — seed from live order so edits
-  // start from real order lines.
+  // After create_order, pending may be empty OR only hold a just-identified
+  // bag (identify overwrites sa_order_pending). For edit_cart, the live order
+  // is always the authoritative base — never treat identify-only pending as
+  // the whole cart (that wiped Bloom+Cloudy when adding a photo bag).
   const recentOrder =
     editOrderEnabled && args.contactPhone
       ? await findRecentOrderForPhone(args.contactPhone)
       : null
-  if (
-    !existingPending.length &&
-    recentOrder &&
-    args.extraction.intent === 'edit_cart'
-  ) {
+  if (recentOrder && args.extraction.intent === 'edit_cart') {
     const raw = Array.isArray(recentOrder.order.items)
       ? (recentOrder.order.items as Array<{
           productId?: string
@@ -1381,7 +1397,10 @@ export async function runCartPipeline(args: {
           image?: string
         }>)
       : []
-    existingPending = orderItemsToPendingQuoted(raw)
+    const liveItems = orderItemsToPendingQuoted(raw)
+    if (liveItems.length) {
+      existingPending = liveItems
+    }
   }
 
   const oldCartSnapshot: CartLineSnapshot[] = existingPending.map((it) => ({
@@ -1634,14 +1653,15 @@ export async function runCartPipeline(args: {
     ).operation
 
   // Color-only fill already applied with no further actions → quote pending as-is
-  const nextPending =
+  const nextPending = mergeDuplicatePendingLines(
     colorOnlyFilled && !resolvedActions.length
       ? existingPending
       : resolvedActions.length
         ? applyCartActionsToPending(existingPending, resolvedActions)
-        : existingPending
+        : existingPending,
+  )
 
-  const workingLines =
+  let workingLines =
     nextPending.length > 0
       ? pendingToResolved(nextPending)
       : resolvedActions
@@ -1753,6 +1773,19 @@ export async function runCartPipeline(args: {
       lines: workingLines,
     }
   }
+
+  // After color canonicalization, collapse duplicate product+color rows
+  workingLines = pendingToResolved(
+    mergeDuplicatePendingLines(
+      workingLines.map((l) => ({
+        productId: l.productId,
+        name: l.name,
+        color: l.color || '',
+        qty: l.qty,
+        price: 0,
+      })),
+    ),
+  )
 
   // Verify old→new vs customer request before sending quote/order update
   const newSnap: CartLineSnapshot[] = workingLines.map((l) => ({
