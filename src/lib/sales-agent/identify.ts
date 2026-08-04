@@ -27,13 +27,14 @@ import {
 } from './identify-text'
 import {
   assignQtysToImageLines,
-  extractColorsFromText,
-  extractExplicitQty,
+  extractColorNearPhotoRef,
   extractOrderIntents,
   looksLikeNamedProductLine,
   parseOrderPending,
+  qtyForThisBagReference,
   quotedItemsFromPending,
   resolveLineItems,
+  stripPhotoReferentialClauses,
   toPendingQuotedItems,
   upsertAwaitingAddressItems,
   type OrderPendingQuotedItem,
@@ -172,6 +173,9 @@ export async function handleInboundIdentifyMany(args: {
     confidence: number
     /** False when match came from a product-only / multi-color catalog shot. */
     colorKnown: boolean
+    /** Raw CLIP/catalog color before caption override. */
+    visionColor?: string | null
+    colorSource?: 'vision' | 'caption' | 'none'
   }>
   /** Bags saved into chat memory after identify + burst named lines. */
   savedItems?: OrderPendingQuotedItem[]
@@ -197,6 +201,8 @@ export async function handleInboundIdentifyMany(args: {
     color: string
     confidence: number
     colorKnown: boolean
+    visionColor?: string | null
+    colorSource?: 'vision' | 'caption' | 'none'
   }> = []
   const quotedItems: OrderPendingQuotedItem[] = []
   const imageCaptions: string[] = []
@@ -230,13 +236,20 @@ export async function handleInboundIdentifyMany(args: {
 
     const caption = (img.caption || '').trim()
     // ImageIdentify may return Pink__2 / _1; identifyBag already normalizes.
-    let color = (best.color || '').trim()
+    const visionColor = (best.color || '').trim()
+    let color = visionColor
     let colorKnown = Boolean(color)
+    let colorSource: 'vision' | 'caption' | 'none' = color
+      ? 'vision'
+      : 'none'
+    // Only override vision color when the customer colored THIS photo
+    // ("me bag red"). Never steal "white" from "cloudy white ekak".
     if (caption) {
-      const cols = extractColorsFromText(caption)
-      if (cols.length) {
-        color = cols[0]
+      const near = extractColorNearPhotoRef(caption)
+      if (near) {
+        color = near
         colorKnown = true
+        colorSource = 'caption'
       }
     }
 
@@ -245,6 +258,8 @@ export async function handleInboundIdentifyMany(args: {
       color,
       confidence: best.confidence,
       colorKnown,
+      visionColor: visionColor || null,
+      colorSource,
     })
 
     const qr = matchProductByIdentifyName(best.product, catalog)
@@ -306,10 +321,12 @@ export async function handleInboundIdentifyMany(args: {
       await upsertAwaitingAddressItems(db, conversationId, quotedItems)
     }
 
-    // Also merge named bags from the same burst (e.g. "Mini shoulder red 1i")
-    // that were not part of the image caption.
-    const extraLines = burstText
-      .split(/\n/)
+    // Also merge named bags from the same burst (e.g. "cloudy white ekak")
+    // that were not part of the photo ask. Strip "me bag 2k" so cloudy
+    // does not inherit qty 2 from the photo line.
+    const namedBurst = stripPhotoReferentialClauses(burstText)
+    const extraLines = namedBurst
+      .split(/\n+/)
       .map((l) => l.trim())
       .filter((l) => l && looksLikeNamedProductLine(l))
     if (extraLines.length) {
@@ -527,8 +544,8 @@ async function buildQuotedItemFromIdentify(
   let color = best.color || ''
   let image: string | undefined
   if (caption) {
-    const cols = extractColorsFromText(caption)
-    if (cols.length) color = cols[0]
+    const near = extractColorNearPhotoRef(caption)
+    if (near) color = near
   }
   if (productId) {
     try {
@@ -546,7 +563,7 @@ async function buildQuotedItemFromIdentify(
     productId,
     name,
     color: color || '',
-    qty: extractExplicitQty(caption || '') ?? 1,
+    qty: qtyForThisBagReference(caption || '') ?? 1,
     price,
     image,
   }

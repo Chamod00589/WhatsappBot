@@ -233,6 +233,50 @@ export function extractColorsFromText(text: string): string[] {
   return found
 }
 
+/**
+ * Color meant for the PHOTO ("me bag red", "meka white") — not a color that
+ * belongs to another named bag in the same message ("… cloudy white ekak").
+ */
+export function extractColorNearPhotoRef(text: string): string | null {
+  const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (!t) return null
+  const windows: string[] = []
+  for (const m of t.matchAll(
+    /\b(?:me\s+bag|this\s+bag|that\s+bag|meka|meke)\b(?:\s+\w+){0,4}/g,
+  )) {
+    windows.push(m[0])
+  }
+  for (const m of t.matchAll(
+    /(?:\b\w+\s+){0,3}\b(?:me\s+bag|this\s+bag|that\s+bag|meka|meke)\b/g,
+  )) {
+    windows.push(m[0])
+  }
+  for (const w of windows) {
+    const cols = extractColorsFromText(w)
+    if (cols.length) return cols[0]
+  }
+  return null
+}
+
+/**
+ * Remove "me bag / this bag …" clauses so named-bag parsing (cloudy ekak)
+ * does not inherit qty/color from the photo line ("me bag 2k").
+ */
+export function stripPhotoReferentialClauses(text: string): string {
+  return text
+    .replace(
+      // Stop at punctuation OR a new named-bag clause ("thawa cloudy…")
+      // so we do not need a period between "me bag 2k" and the next ask.
+      /\b(?:mata\s+)?(?:me\s+bag|this\s+bag|that\s+bag|meka|meke)\b[^.!?\n]*?(?=(?:\s*[.!?]|\s+\b(?:thawa|then|and|plus|also)\b|$))/gi,
+      ' ',
+    )
+    .replace(/[.!?,;]+/g, '\n')
+    .split(/\n+/)
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
 /** True when the whole message is basically just a color choice. */
 export function parseColorOnlyReply(text: string): string | null {
   const trimmed = text.trim()
@@ -400,7 +444,22 @@ export function assignQtysToImageLines(
 ): number[] {
   if (imageCount <= 0) return []
 
-  const fromCaptions = captions.map((c) => extractExplicitQty(c || ''))
+  // Prefer qty next to "me bag / this bag". Never take "2" from a mixed
+  // caption's other product ("me bag … cloudy white ekak" / "puff Pink 2").
+  const fromCaptions = captions.map((c) => {
+    const raw = c || ''
+    const photoQty = qtyForThisBagReference(raw)
+    if (photoQty != null) return photoQty
+    if (
+      looksLikeImageReferentialText(raw) &&
+      /\b(puff|mini|bloom|cloudy|bunny|tote|sling|handbag|shoulder)\b/i.test(
+        raw,
+      )
+    ) {
+      return null
+    }
+    return extractExplicitQty(raw)
+  })
   const allHaveCaptionQty = fromCaptions.every((q) => q != null)
   if (allHaveCaptionQty) {
     return fromCaptions.map((q) => q as number)

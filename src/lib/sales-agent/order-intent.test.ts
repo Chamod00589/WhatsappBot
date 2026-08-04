@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyPendingOverridesToItems,
+  assignQtysToImageLines,
+  extractColorNearPhotoRef,
   extractOrderIntents,
   extractQty,
   looksLikeImageReferentialText,
@@ -8,6 +10,7 @@ import {
   parseColorOnlyReply,
   productDisplayName,
   resolveOrderIntentsForAddress,
+  stripPhotoReferentialClauses,
 } from './order-intent'
 import { isAddressLikeMessage } from './actions/orders'
 import { buildProductNeedles, type MatchableQuickReply } from './match-products'
@@ -225,5 +228,33 @@ White bag ekakuth ewanna`
     expect(productDisplayName('Cloudy Shoulder Bag Details Quick Reply')).toBe(
       'Cloudy Shoulder Bag',
     )
+  })
+
+  it('does not steal cloudy white onto me-bag photo color', () => {
+    const burst =
+      'Mata me bag 2k oni. Thawa cloudy white ekak oni'
+    expect(extractColorNearPhotoRef(burst)).toBeNull()
+    expect(stripPhotoReferentialClauses(burst).toLowerCase()).toContain(
+      'cloudy',
+    )
+    expect(stripPhotoReferentialClauses(burst).toLowerCase()).not.toMatch(
+      /\bme\s+bag\b/,
+    )
+    const named = stripPhotoReferentialClauses(burst)
+    const intents = extractOrderIntents([named], [cloudy])
+    expect(intents).toHaveLength(1)
+    expect(intents[0]?.name.toLowerCase()).toContain('cloudy')
+    expect(intents[0]?.color?.toLowerCase()).toBe('white')
+    expect(intents[0]?.qty).toBe(1)
+    expect(assignQtysToImageLines(1, [burst], burst)).toEqual([2])
+  })
+
+  it('strips me-bag clause even without a period before thawa', () => {
+    const named = stripPhotoReferentialClauses(
+      'Mata me bag 2k oni Thawa cloudy white ekak oni',
+    )
+    expect(named.toLowerCase()).toContain('cloudy')
+    expect(named.toLowerCase()).not.toMatch(/\bme\s+bag\b/)
+    expect(extractOrderIntents([named], [cloudy])[0]?.qty).toBe(1)
   })
 })

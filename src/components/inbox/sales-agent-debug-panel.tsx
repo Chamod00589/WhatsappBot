@@ -195,6 +195,16 @@ export function SalesAgentDebugPanel({
 
                     {isOpen ? (
                       <div className="space-y-3 border-t border-border px-2.5 py-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <CopyButton
+                            text={formatCompleteRun(run)}
+                            label="Copy complete run"
+                          />
+                          <span className="text-[10px] text-muted-foreground">
+                            Paste into chat for troubleshooting
+                          </span>
+                        </div>
+
                         {run.inbound_text ? (
                           <Section
                             title="Inbound"
@@ -604,3 +614,59 @@ function safeJson(v: unknown): string {
     return String(v)
   }
 }
+
+/** One pasteable dump: inbound + caps + steps + identify + tools + reply. */
+function formatCompleteRun(run: RunRow): string {
+  const p = run.payload || {}
+  const parts: string[] = [
+    `status: ${run.status}`,
+    `at: ${run.created_at}`,
+    `content_type: ${run.content_type || '—'}`,
+    run.skip_reason ? `skip_reason: ${run.skip_reason}` : '',
+    '',
+    '=== Inbound ===',
+    run.inbound_text || '(no text)',
+    '',
+    `Language: ${p.use_singlish ? 'Singlish' : 'Match customer'}`,
+  ]
+
+  if (p.capabilities) {
+    parts.push('', '=== Capabilities ===', safeJson(p.capabilities))
+  }
+  if (p.ai_context?.length) {
+    parts.push('', '=== AI context ===', formatAiContext(p.ai_context))
+  }
+  if (p.identify != null) {
+    parts.push('', '=== Identify ===', safeJson(p.identify))
+  }
+  if (p.product_hits?.length) {
+    parts.push(
+      '',
+      '=== Product hits ===',
+      p.product_hits
+        .map((h) => `${h.title} (${h.catalog_message_id || '—'})`)
+        .join('\n'),
+    )
+  }
+  if (p.custom_qr_match) {
+    parts.push('', '=== Custom QR ===', safeJson(p.custom_qr_match))
+  }
+  if (p.tools?.length) {
+    parts.push('', '=== Tools ===', formatTools(p.tools))
+  }
+  if (p.reply) {
+    parts.push('', '=== Reply ===', safeJson(p.reply))
+  }
+  if (p.usage) {
+    parts.push('', '=== Tokens ===', safeJson(p.usage))
+  }
+  if (p.error) {
+    parts.push('', '=== Error ===', p.error)
+  }
+  if (p.steps?.length) {
+    parts.push('', '=== Process steps ===', formatSteps(p.steps))
+  }
+  parts.push('', '=== Raw payload ===', safeJson(p))
+  return parts.filter((line, i, arr) => !(line === '' && arr[i - 1] === '')).join('\n')
+}
+
