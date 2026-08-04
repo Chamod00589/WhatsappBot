@@ -14,7 +14,7 @@ import {
 } from './gates'
 import { buildSalesAgentContext } from './context'
 import { detectReplyMode } from './language'
-import { parseIdentifyPending } from './identify'
+import { parseIdentifyPending, handleInboundIdentifyMany } from './identify'
 import { parseOrderPending } from './order-intent'
 import { actionMarkHuman, isAddressLikeMessage } from './actions/orders'
 import { runSalesAgentToolLoop } from './tool-loop'
@@ -368,7 +368,103 @@ export async function dispatchSalesAgentNow(
         ? [{ role: 'user' as const, content: burstText }]
         : [{ role: 'user' as const, content: '[customer sent an image]' }]
 
-    // Extract → validate → quote pipeline (LLM extracts JSON only; server owns cart).
+    // ── 1) Identify inbound images FIRST (before cart extract) ──────────
+    // So "this bag" can resolve to the photo product, and we only quote once
+    // after text+photo bags are merged.
+    let identifyAlreadyDone = false
+    let quoteSentThisTurn = false
+    let identifyHandled = false
+    if (config.identify && inboundImages.length > 0) {
+      try {
+        log.step(
+          'identify',
+          `Identifying ${inboundImages.length} inbound image(s) before cart`,
+        )
+        const idResult = await handleInboundIdentifyMany({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          configOwnerUserId,
+          images: inboundImages,
+          burstText,
+          useSinglish,
+        })
+        identifyAlreadyDone = true
+        identifyHandled = idResult.handled
+        const identifyPayload = {
+          identified: idResult.identified,
+          sentQr: idResult.sentQr,
+          qrCount: idResult.qrCount,
+          savedItems: (idResult.savedItems || []).map((it) => ({
+            productId: it.productId,
+            name: it.name,
+            color: it.color,
+            qty: it.qty,
+            price: it.price,
+          })),
+        }
+        log.set({ identify: identifyPayload })
+        log.step(
+          'identify',
+          idResult.sentQr
+            ? `identified + sent ${idResult.qrCount} product card(s); saved ${(idResult.savedItems || []).length} line(s)`
+            : idResult.handled
+              ? 'identified — asked customer to confirm'
+              : idResult.identified.length
+                ? 'identified (no high-confidence QR yet)'
+                : 'no identify match',
+          identifyPayload,
+        )
+
+        if (idResult.identified.length) {
+          const photoLines = idResult.identified
+            .map((m) => {
+              const colorPart = m.colorKnown && m.color
+                ? m.color
+                : 'color unknown'
+              return `${m.product} / ${colorPart} (${m.confidence.toFixed(0)}%)`
+            })
+            .join('; ')
+          systemExtra = [
+            systemExtra,
+            `PHOTO IDENTIFIED this turn (authoritative for "this bag" / "me bag" / "meka"):\n${photoLines}`,
+            idResult.savedItems?.length
+              ? `Saved after identify: ${idResult.savedItems
+                  .map(
+                    (i) =>
+                      `${i.name}${i.color ? `/${i.color}` : ''} x${i.qty}`,
+                  )
+                  .join('; ')}`
+              : '',
+            'Images already identified + product cards sent when matched. Do NOT call identify_product again this turn. Cart pipeline will send at most one quotation.',
+          ]
+            .filter(Boolean)
+            .join('\n\n')
+        }
+
+        // Refresh pending after identify merge
+        const { data: convAfterId } = await db
+          .from('conversations')
+          .select('sa_order_pending, sa_identify_pending')
+          .eq('id', conversationId)
+          .maybeSingle()
+        orderPendingForExtra =
+          convAfterId?.sa_order_pending ?? orderPendingForExtra
+        if (convAfterId) {
+          gate.conversation.sa_identify_pending =
+            convAfterId.sa_identify_pending
+        }
+      } catch (err) {
+        console.warn('[sales-agent] early identify failed:', err)
+        log.step(
+          'identify',
+          `Identify failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
+    // ── 2) Cart extract → validate → quote (uses identify results above) ─
     let cartHandled = false
     let extractUsage: AiUsage | null = null
     if (
@@ -414,6 +510,7 @@ export async function dispatchSalesAgentNow(
             burstText,
           })
           cartHandled = pipe.handled
+          if (pipe.quoted) quoteSentThisTurn = true
           log.step(
             'cart_pipeline',
             pipe.message,
@@ -428,7 +525,10 @@ export async function dispatchSalesAgentNow(
           if (pipe.handled) {
             systemExtra = [
               systemExtra,
-              `Cart pipeline already handled this turn: quoted=${pipe.quoted} clarified=${pipe.clarified} updated=${pipe.updated}. Do not invent products/prices. Continue only for FAQ, identify images, address→create_order, tracking, or handoff.`,
+              `Cart pipeline already handled this turn: quoted=${pipe.quoted} clarified=${pipe.clarified} updated=${pipe.updated}. Do not invent products/prices. Continue only for FAQ, address→create_order, tracking, or handoff.`,
+              pipe.quoted
+                ? 'Quotation already sent this turn — do NOT call identify_product or generate another quote.'
+                : '',
               pipe.updated && !pipe.quoted && isAddressLikeMessage(burstText)
                 ? 'Customer sent address this turn — cart was saved WITHOUT a quotation. Call create_order with address_text only. Do NOT call generate_quote / send another quotation. Order confirm includes bags, prices, and shipping.'
                 : '',
@@ -492,13 +592,12 @@ export async function dispatchSalesAgentNow(
       }
     }
 
-    // If cart clarified/quoted and there is no image / no other work needed,
-    // still allow tool loop for address/FAQ/identify — but skip when image-less
-    // and cart already replied unless the burst looks like an address.
+    // If cart clarified/quoted and there is no more work, skip the tool loop.
+    // Images already identified above — don't re-enter just to identify again.
     const likelyAddress = isAddressLikeMessage(burstText)
     const skipToolLoop =
       (cartHandled || productDetailsHandled) &&
-      inboundImages.length === 0 &&
+      (inboundImages.length === 0 || identifyAlreadyDone) &&
       !likelyAddress &&
       !adBlurb
 
@@ -507,7 +606,9 @@ export async function dispatchSalesAgentNow(
         'ai_tools',
         productDetailsHandled
           ? 'Skipped tool loop — product Details QR sent for colors/details ask'
-          : 'Skipped tool loop — cart pipeline already replied (no images/address)',
+          : identifyAlreadyDone && cartHandled
+            ? 'Skipped tool loop — identify + cart already handled this turn'
+            : 'Skipped tool loop — cart pipeline already replied (no address/FAQ needed)',
       )
       if (extractUsage) {
         void logAiUsage(db, {
@@ -551,9 +652,11 @@ export async function dispatchSalesAgentNow(
       replyMode,
       productCatalog: products,
       customCatalog: customs,
-      inboundImages,
+      inboundImages: identifyAlreadyDone ? [] : inboundImages,
       burstText,
       debug: log,
+      quoteSentThisTurn,
+      identifyAlreadyDone,
     })
 
     // Prefer tool-loop usage; fall back to extract usage.
@@ -561,7 +664,11 @@ export async function dispatchSalesAgentNow(
 
     log.set({
       reply: {
-        replied: result.replied || cartHandled || productDetailsHandled,
+        replied:
+          result.replied ||
+          cartHandled ||
+          productDetailsHandled ||
+          identifyHandled,
         handoff: result.handoff,
         text: result.replyText?.slice(0, 500),
       },
@@ -571,13 +678,23 @@ export async function dispatchSalesAgentNow(
       'ai_result',
       result.handoff
         ? 'Model requested handoff / could not complete'
-        : result.replied || cartHandled || productDetailsHandled
+        : result.replied ||
+            cartHandled ||
+            productDetailsHandled ||
+            identifyHandled
           ? 'Agent handled the turn'
           : 'Agent produced no reply',
       {
-        replied: result.replied || cartHandled || productDetailsHandled,
+        replied:
+          result.replied ||
+          cartHandled ||
+          productDetailsHandled ||
+          identifyHandled,
         handoff: result.handoff,
         cartHandled,
+        identifyHandled,
+        identifyAlreadyDone,
+        quoteSentThisTurn,
         productDetailsHandled,
         usage,
       },
@@ -592,7 +709,13 @@ export async function dispatchSalesAgentNow(
       usage,
     })
 
-    if (result.handoff || (!result.replied && !cartHandled && !productDetailsHandled)) {
+    if (
+      result.handoff ||
+      (!result.replied &&
+        !cartHandled &&
+        !productDetailsHandled &&
+        !identifyHandled)
+    ) {
       const summary = buildHandoffSummary({
         messages: loopMessages,
         replyCount: gate.conversation.ai_reply_count ?? 0,
@@ -636,7 +759,12 @@ export async function dispatchSalesAgentNow(
       return
     }
 
-    if (result.replied || cartHandled || productDetailsHandled) {
+    if (
+      result.replied ||
+      cartHandled ||
+      productDetailsHandled ||
+      identifyHandled
+    ) {
       if (inboundText) {
         await rememberAnsweredQuestion(db, conversationId, inboundText)
       }

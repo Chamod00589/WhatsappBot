@@ -69,6 +69,8 @@ export type ToolExecContext = {
    * (avoids duplicate generate_quote after identify auto-quote).
    */
   quoteSentThisTurn: boolean
+  /** When true, identify_product is a no-op (already ran in dispatch). */
+  identifyAlreadyDone: boolean
   inboundImages: Array<{
     mediaUrl?: string | null
     metaMediaId?: string | null
@@ -157,6 +159,23 @@ async function execIdentifyProduct(
   ctx: ToolExecContext,
   a: Record<string, unknown>,
 ): Promise<ToolExecResult> {
+  if (ctx.identifyAlreadyDone) {
+    const pending = await loadPendingItems(ctx)
+    return {
+      replied: true,
+      handoff: false,
+      note: 'identify already completed earlier this turn — skipped duplicate',
+      resultPayload: {
+        already_done: true,
+        quotation_sent: ctx.quoteSentThisTurn,
+        saved_items: pending,
+        next: ctx.quoteSentThisTurn
+          ? 'Quotation already sent — do not quote again.'
+          : 'Use saved_items; cart pipeline owns quotation.',
+      },
+    }
+  }
+
   const sendCard = a.send_product_card !== false
   const images = ctx.inboundImages.filter((i) => i.metaMediaId || i.mediaUrl)
 

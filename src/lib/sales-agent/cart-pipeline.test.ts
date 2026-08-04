@@ -9,6 +9,7 @@ import {
   combineConfidence,
   heuristicLinesFromText,
   looksLikeAbsoluteQtyDesire,
+  mergePhotoPendingIntoResolved,
   resolveExtractionItems,
   resolveMentionedProduct,
   validateProductColor,
@@ -119,6 +120,37 @@ describe('resolveExtractionItems with catalog productId', () => {
     expect(resolved.lines[0]?.productId).toBe('cloudy-1')
     expect(resolved.lines[0]?.color).toBe('White')
     expect(resolved.lines[0]?.qty).toBe(2)
+  })
+})
+
+describe('mergePhotoPendingIntoResolved', () => {
+  it('keeps Mini from identify when extract only returned Puff', () => {
+    const merged = mergePhotoPendingIntoResolved(
+      [
+        {
+          productId: 'mini-1',
+          name: 'Mini Shoulder Bag',
+          color: 'Black',
+          qty: 1,
+          price: 990,
+        },
+      ],
+      [
+        {
+          productId: 'puff-1',
+          name: 'Puff Shoulder Bag',
+          color: 'Pink',
+          qty: 2,
+          confidence: 0.99,
+        },
+      ],
+    )
+    expect(merged).toHaveLength(2)
+    expect(merged[0].productId).toBe('mini-1')
+    expect(merged[0].color?.toLowerCase()).toBe('black')
+    expect(merged[0].qty).toBe(1)
+    expect(merged[1].productId).toBe('puff-1')
+    expect(merged[1].qty).toBe(2)
   })
 })
 

@@ -70,6 +70,10 @@ export interface ToolLoopArgs {
   }>
   burstText: string
   debug?: SalesAgentRunLogger
+  /** Quotation already sent earlier this turn (cart pipeline / early identify). */
+  quoteSentThisTurn?: boolean
+  /** Images already identified in dispatch before the tool loop. */
+  identifyAlreadyDone?: boolean
 }
 
 export interface ToolLoopResult {
@@ -121,9 +125,11 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
     })
     .join('\n')
 
-  const imageNote = args.inboundImages.length
-    ? `Customer attached ${args.inboundImages.length} image(s) this turn — call identify_product when they look like bag photos.`
-    : 'No new images this turn.'
+  const imageNote = args.identifyAlreadyDone
+    ? 'Inbound images were already identified this turn (see PHOTO IDENTIFIED in Session state). Do NOT call identify_product again.'
+    : args.inboundImages.length
+      ? `Customer attached ${args.inboundImages.length} image(s) this turn — call identify_product when they look like bag photos.`
+      : 'No new images this turn.'
 
   const parts = [
     'You are the Ladies Bags WhatsApp sales agent for ladiesbags.lk.',
@@ -140,7 +146,7 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
     '- NEVER use answer_policy / custom FAQ for "what colors does this bag have" / bag details / photos — call find_product for that bag instead (prefer Session pending / last quoted bag for "me bag").',
     '- If NONE of the FAQ descriptions fit the question, call handover_to_human (do not invent an answer).',
     'Flow tips:',
-    '- Bag photo → identify_product (send_product_card true). Server sends matching product QR card(s), then may AUTOMATICALLY send a price quotation when bag+color+qty are complete.',
+    '- Bag photo → server identifies FIRST (before cart). Product QR may already be sent. Then cart pipeline sends at most ONE quotation for photo + named bags.',
     '- Customer asks colors/details of a bag (or "me bag eke colors") → find_product for that product Details QR (color images + price text). Product QRs once per chat unless they ask again — server may already have sent it this turn.',
     '- Identify catalog may include several angles of the same color (Pink / Pink__2) and product-only multi-color shots (_1). If identified[].colorKnown is false or color is empty / color_unknown is set, ask which color with ask_missing_information — never invent black/white/pink.',
     '- Caption text about THIS photo ("me bag 2k", "meka white") applies qty/color to that bag.',
@@ -186,7 +192,8 @@ function buildExecContext(args: ToolLoopArgs): ToolExecContext {
     useSinglish: args.useSinglish,
     replyMode,
     quotationEnabled: Boolean(args.config.quotation),
-    quoteSentThisTurn: false,
+    quoteSentThisTurn: Boolean(args.quoteSentThisTurn),
+    identifyAlreadyDone: Boolean(args.identifyAlreadyDone),
     inboundImages: args.inboundImages,
     burstText: args.burstText,
     productCatalog: args.productCatalog,

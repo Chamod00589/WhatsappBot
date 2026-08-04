@@ -115,6 +115,8 @@ Return ONLY valid JSON (no markdown):
 Rules:
 - ALWAYS pick productId + name from the CATALOG LIST. Never invent bags not on the list.
 - color MUST be copied exactly from that product's colors=[...] when the customer stated a color. If they did not say a color, use null (server will ask).
+- When Session state lists PHOTO IDENTIFIED bag(s), "this bag" / "that bag" / "me bag" / "meka" / "meke" means THAT photo product — include it as an items[] row (use the identified productId/name/color). Do NOT drop the photo bag when they also name another bag.
+- Example: photo = Mini Shoulder Bag (Black) + text "Can i buy this bag and puff Pink 2 bags" → TWO items: Mini Black qty 1 + Puff Pink qty 2.
 - qty = how many pieces they want. Understand Singlish freely (dekak=2, thunak=3, "2k"/"2i"=2, "1kui"=1, "ekak"=1). Default qty=1 when they want the bag but gave no count.
 - Keep each bag/color as a SEPARATE items[] row — do NOT merge. Same bag in two colors = two items.
 - Example: "Cloudy white 2i black 1k" → two items: Cloudy White qty 2 + Cloudy Black qty 1 (same productId, different colors).

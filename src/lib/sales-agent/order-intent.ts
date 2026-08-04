@@ -372,6 +372,24 @@ export function extractQty(text: string): number {
 }
 
 /**
+ * Qty attached to a photo reference ("this bag 2k", "meka 2i"), not to
+ * another named bag in the same sentence ("this bag and puff Pink 2 bags").
+ */
+export function qtyForThisBagReference(text: string): number | null {
+  const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (!t) return null
+  // Only allow a short glue word between the photo ref and the number —
+  // not another product name ("this bag and puff Pink 2").
+  const near = t.match(
+    /\b(?:this\s+bag|that\s+bag|me\s+bag|meka|meke)\b(?:\s+(?:eka|eken|x|of|for)){0,2}\s+(\d+)\s*[ik]?\b|\b(\d+)\s*[ik]?\s+(?:x\s+)?(?:of\s+)?(?:this\s+bag|that\s+bag|me\s+bag|meka|meke)\b/,
+  )
+  if (!near) return null
+  const n = Number(near[1] || near[2])
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Math.floor(n)
+}
+
+/**
  * Assign a qty to each image line from its caption, else zip global qty
  * mentions onto images in order, else 1.
  */
@@ -405,10 +423,22 @@ export function assignQtysToImageLines(
 
   if (
     imageCount === 1 &&
-    fromCaptions[0] == null &&
-    globalQtys.length >= 1
+    fromCaptions[0] == null
   ) {
-    out[0] = globalQtys[0]
+    const photoQty = qtyForThisBagReference(inboundText || '')
+    if (photoQty != null) {
+      out[0] = photoQty
+    } else if (
+      looksLikeImageReferentialText(inboundText || '') &&
+      /\b(puff|mini|bloom|cloudy|bunny|tote|sling|handbag|shoulder)\b/i.test(
+        inboundText || '',
+      )
+    ) {
+      // "this bag and puff Pink 2 bags" — the 2 belongs to puff, not the photo
+      out[0] = 1
+    } else if (globalQtys.length >= 1) {
+      out[0] = globalQtys[0]
+    }
   }
 
   return out
@@ -435,16 +465,24 @@ export function looksLikeImageReferentialText(text: string): boolean {
 export function looksLikeNamedProductLine(text: string): boolean {
   const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
   if (!t) return false
-  if (looksLikeImageReferentialText(t)) return false
+  // Pure photo-referential lines ("meka 2k") are captions, not named bags.
+  // Mixed lines ("this bag and puff Pink 2") still name another product.
+  if (
+    looksLikeImageReferentialText(t) &&
+    !/\b(puff|mini|bloom|cloudy|bunny|tote|sling|handbag)\b/.test(t) &&
+    !/\b[a-z]{3,}\s+(shoulder|bag|pouch)\b/.test(t)
+  ) {
+    return false
+  }
 
   // Common catalog tokens / bag words + color or qty cue
   const namedBag =
-    /\b(mini|bloom|cloudy|bunny|pouch|shoulder|cross\s*body|tote|sling|handbag)\b/.test(
+    /\b(mini|bloom|cloudy|bunny|pouch|shoulder|cross\s*body|tote|sling|handbag|puff)\b/.test(
       t,
     ) || /\b[a-z]{3,}\s+(shoulder|bag|pouch)\b/.test(t)
   const hasColor = extractColorsFromText(t).length > 0
   const hasQty = extractExplicitQty(t) != null
-  const buyCue = /\b(oni|onne|ganna|ganne|venum|want)\b/.test(t)
+  const buyCue = /\b(oni|onne|ganna|ganne|venum|want|buy)\b/.test(t)
 
   if (namedBag && (hasColor || hasQty || buyCue)) return true
   if (namedBag && t.split(' ').length >= 2) return true

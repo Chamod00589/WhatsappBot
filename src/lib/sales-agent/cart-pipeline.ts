@@ -421,6 +421,33 @@ export function mergePendingQuotedAdd(
 }
 
 /**
+ * Keep identify-saved photo lines that the cart extract omitted
+ * (e.g. extract only returned Puff while pending already has Mini from the photo).
+ */
+export function mergePhotoPendingIntoResolved(
+  existing: OrderPendingQuotedItem[],
+  resolved: ResolvedCartLine[],
+): ResolvedCartLine[] {
+  if (!existing.length || !resolved.length) return resolved
+  const coveredPids = new Set(
+    resolved.map((r) => r.productId).filter(Boolean),
+  )
+  const extras: ResolvedCartLine[] = []
+  for (const e of existing) {
+    if (!e.productId || coveredPids.has(e.productId)) continue
+    extras.push({
+      productId: e.productId,
+      name: e.name,
+      color: e.color?.trim() ? e.color : null,
+      qty: Math.max(1, Number(e.qty) || 1),
+      confidence: 0.99,
+    })
+  }
+  if (!extras.length) return resolved
+  return [...extras, ...resolved]
+}
+
+/**
  * Every line must have productId + qty + color (when product has colors).
  */
 export function checkQuoteCompleteness(
@@ -991,6 +1018,16 @@ export async function runCartPipeline(args: {
       message: text,
       clarifyReason: clarify.reason,
     }
+  }
+
+  // Photo bags saved by early identify must not be wiped when extract only
+  // returns the named bag ("this bag and puff Pink 2" → keep Mini + Puff).
+  if (
+    existingPending.length &&
+    resolved.length &&
+    (extraction.intent === 'quotation' || extraction.intent === 'edit_cart')
+  ) {
+    resolved = mergePhotoPendingIntoResolved(existingPending, resolved)
   }
 
   const operation: CartOperation = coerceCartOperation({

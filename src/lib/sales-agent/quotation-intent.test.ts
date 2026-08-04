@@ -57,6 +57,20 @@ describe('quotation-intent', () => {
     ).toEqual([2, 5])
   })
 
+  it('does not steal puff qty onto photo for "this bag and puff Pink 2 bags"', () => {
+    expect(
+      assignQtysToImageLines(
+        1,
+        [''],
+        'Can i buy this bag and puff Pink 2 bags',
+      ),
+    ).toEqual([1])
+  })
+
+  it('still applies qty next to this bag', () => {
+    expect(assignQtysToImageLines(1, [''], 'this bag 2k oni')).toEqual([2])
+  })
+
   it('parses explicit qty helpers', () => {
     expect(extractExplicitQty('meka 3k ganna')).toBe(3)
     expect(extractAllQtys('2k ganna\n3k ganna')).toEqual([2, 3])

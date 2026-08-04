@@ -43,6 +43,9 @@ describe('order-intent', () => {
     expect(looksLikeImageReferentialText('meka white karanna')).toBe(true)
     expect(looksLikeNamedProductLine('Mini sholder red 1i oni')).toBe(true)
     expect(looksLikeNamedProductLine('Mata me bag 2k oni')).toBe(false)
+    expect(
+      looksLikeNamedProductLine('Can i buy this bag and puff Pink 2 bags'),
+    ).toBe(true)
   })
 
   it('prefers pending identify color over wrong model color', () => {
