@@ -21,13 +21,16 @@ import { runSalesAgentToolLoop } from './tool-loop'
 import { loadAgentCatalogs } from './tool-executors'
 import { extractCartIntent } from './cart-intent-extract'
 import { runCartPipeline } from './cart-pipeline'
-import { maybeSendProductDetailsQr } from './product-details-qr'
+import { maybeSendProductDetailsQr, isProductDetailsOrColorsAsk } from './product-details-qr'
+import { isQuotationRequest } from './quotation-intent'
+import { findRecentOrderForPhone, isAddToOrderRequest } from './order-edit-intent'
 import { SalesAgentRunLogger } from './debug-log'
 import { rememberAnsweredQuestion } from './dedupe'
 import type { AiUsage } from '@/lib/ai/types'
 import {
   applyReplyReferenceToPending,
   resolveReplyReference,
+  shouldApplyReplyRefToPending,
 } from './reply-reference'
 import { markAgentUnableToReply, removeNamedTag } from './tags'
 import { formatAdReferralForAgent, withAdReferralText } from './referral'
@@ -313,20 +316,28 @@ export async function dispatchSalesAgentNow(
           inboundText,
         })
         if (ref?.productName) {
-          await applyReplyReferenceToPending({
-            db,
-            conversationId,
-            ref,
-          })
-          const { data: convFresh } = await db
-            .from('conversations')
-            .select('sa_order_pending')
-            .eq('id', conversationId)
-            .maybeSingle()
-          orderPendingForExtra = convFresh?.sa_order_pending ?? orderPendingForExtra
+          // Color-pick swipe → update pending. Add ("ekath") → note only
+          // so cart extract does not double-count qty.
+          if (shouldApplyReplyRefToPending(inboundText)) {
+            await applyReplyReferenceToPending({
+              db,
+              conversationId,
+              ref,
+            })
+            const { data: convFresh } = await db
+              .from('conversations')
+              .select('sa_order_pending')
+              .eq('id', conversationId)
+              .maybeSingle()
+            orderPendingForExtra =
+              convFresh?.sa_order_pending ?? orderPendingForExtra
+          }
           replyRefNote =
             `Customer swipe-replied to a product message — use THIS bag/color (not an older identify):\n` +
-            `${ref.productName} / ${ref.color || '—'} x${ref.qty || 1} (source=${ref.source}).`
+            `${ref.productName} / ${ref.color || '—'} x${ref.qty || 1} (source=${ref.source}).` +
+            (isAddToOrderRequest(inboundText)
+              ? '\nThis is an ADD request — include this bag once at qty 1 unless they stated another count.'
+              : '')
           log.step('reply_ref', replyRefNote, ref)
         } else {
           log.step(
@@ -348,6 +359,39 @@ export async function dispatchSalesAgentNow(
       db,
       conversationId,
     )
+
+    // Live order lines for edit context (after create_order pending is cleared).
+    let liveOrderLinesNote = ''
+    if (config.editOrder && contactPhone) {
+      try {
+        const recent = await findRecentOrderForPhone(contactPhone)
+        if (recent) {
+          const items = Array.isArray(recent.order.items)
+            ? (recent.order.items as Array<{
+                productId?: string
+                name?: string
+                color?: string
+                quantity?: number
+              }>)
+            : []
+          if (items.length) {
+            liveOrderLinesNote =
+              `CURRENT LIVE ORDER ${recent.id} (authoritative for edit_cart / color swap / remove):\n` +
+              items
+                .map(
+                  (it) =>
+                    `${it.name || 'Bag'}${it.color ? ` / ${it.color}` : ''} x${Math.max(1, Number(it.quantity) || 1)}` +
+                    (it.productId ? ` [id=${it.productId}]` : ''),
+                )
+                .join('\n') +
+              '\nWhen customer changes color/qty/remove, edit THIS order — do not invent other bags from old screenshots.'
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
     let systemExtra = [
       buildSessionStateExtra({
         orderPending: orderPendingForExtra,
@@ -356,6 +400,7 @@ export async function dispatchSalesAgentNow(
         burstText,
         adReferral: adBlurb,
         addressQrAlreadySent,
+        liveOrderLinesNote,
       }),
       replyRefNote,
     ]
@@ -464,10 +509,54 @@ export async function dispatchSalesAgentNow(
       }
     }
 
+    // ── 1b) Photo/details ask → Details QR only (no quotation) ──────────
+    let productDetailsHandled = false
+    const detailsOnlyAsk =
+      Boolean(burstText.trim()) &&
+      isProductDetailsOrColorsAsk(burstText) &&
+      !isQuotationRequest(burstText) &&
+      !isAddToOrderRequest(burstText) &&
+      !/\b(ganna|ganne|oni|onne|buy|order\s+eka)\b/i.test(burstText)
+
+    if (config.productMatch && detailsOnlyAsk) {
+      try {
+        const details = await maybeSendProductDetailsQr({
+          db,
+          accountId,
+          conversationId,
+          burstText,
+          orderPending: orderPendingForExtra,
+          productCatalog: products,
+          forceResend: true,
+        })
+        if (details.sent) {
+          productDetailsHandled = true
+          log.step('product_details_qr', details.note, {
+            productName: details.productName,
+          })
+          systemExtra = [
+            systemExtra,
+            `Product Details QR already sent this turn for ${details.productName || 'bag'} (photos/colors/details ask). Do NOT quote. Do NOT call answer_policy for product colors.`,
+          ]
+            .filter(Boolean)
+            .join('\n\n')
+        } else if (details.note && !details.note.startsWith('not a')) {
+          log.step('product_details_qr', details.note)
+        }
+      } catch (err) {
+        console.warn('[sales-agent] product details QR (early) failed:', err)
+        log.step(
+          'product_details_qr',
+          `failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
     // ── 2) Cart extract → validate → quote (uses identify results above) ─
     let cartHandled = false
     let extractUsage: AiUsage | null = null
     if (
+      !productDetailsHandled &&
       (config.quotation || config.editOrder) &&
       burstText.trim() &&
       config.aiText
@@ -556,9 +645,8 @@ export async function dispatchSalesAgentNow(
     }
 
     // Product colors/details ask → send that bag's Details QR (not custom FAQ).
-    // Prefer pending/quoted "me bag". Once per chat unless they ask again (this ask counts).
-    let productDetailsHandled = false
-    if (config.productMatch && burstText.trim()) {
+    // Prefer pending/quoted "me bag". Skip if early details-only path already sent.
+    if (config.productMatch && burstText.trim() && !productDetailsHandled) {
       try {
         const details = await maybeSendProductDetailsQr({
           db,
@@ -811,6 +899,7 @@ function buildSessionStateExtra(args: {
   burstText: string
   adReferral?: string | null
   addressQrAlreadySent?: boolean
+  liveOrderLinesNote?: string
 }): string {
   const lines: string[] = []
   lines.push(`Inbound image count this turn: ${args.inboundImages}`)
@@ -833,12 +922,13 @@ function buildSessionStateExtra(args: {
   const order = parseOrderPending(args.orderPending)
   if (order?.type === 'awaiting_address') {
     lines.push(
-      `Saved bags awaiting address: ${order.items
+      `SELECTED BAGS (quotation cart — use for add/remove/qty/color before order):\n${order.items
         .map(
           (i) =>
-            `${i.name}${i.color ? `/${i.color}` : ''} x${i.qty}`,
+            `${i.name}${i.color ? `/${i.color}` : ''} x${i.qty}` +
+            (i.productId ? ` [id=${i.productId}]` : ''),
         )
-        .join('; ')}`,
+        .join('\n')}`,
     )
   } else if (order?.type === 'awaiting_color') {
     lines.push(
@@ -849,6 +939,10 @@ function buildSessionStateExtra(args: {
     if (order.addressText) {
       lines.push(`Saved address text: ${order.addressText.slice(0, 300)}`)
     }
+  }
+
+  if (args.liveOrderLinesNote?.trim()) {
+    lines.push(args.liveOrderLinesNote.trim())
   }
 
   const identify = parseIdentifyPending(args.identifyPending)

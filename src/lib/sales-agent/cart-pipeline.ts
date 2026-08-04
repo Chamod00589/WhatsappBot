@@ -34,6 +34,118 @@ export const CART_CONFIDENCE_AUTO = 0.9
 export const CART_CONFIDENCE_ASK = 0.6
 export const CART_MAX_QTY = 50
 
+/**
+ * "White eken oni + brown ain karanna" → want White, remove Brown.
+ * Prefer per-clause matching so "oni" in the want sentence does not
+ * also tag the remove sentence.
+ */
+export function parseColorSwapRequest(
+  text: string,
+): { want: string; remove: string } | null {
+  const raw = text.replace(/\s+/g, ' ').trim()
+  if (!raw) return null
+  const t = raw.toLowerCase()
+  const hasRemove = /\b(ain|nathiwa|nathuwa|remove|without)\b/.test(t)
+  const hasWant = /\b(eken|oni|onne|denna|want|ganna|ganne)\b/.test(t)
+  if (!hasRemove || !hasWant) return null
+
+  const clauses = raw
+    .split(/[.!?\n]+|(?=\bmeke\b)|(?=\bthawa\b)/i)
+    .map((s) => s.trim())
+    .filter(Boolean)
+
+  let want: string | null = null
+  let remove: string | null = null
+
+  for (const clause of clauses.length ? clauses : [raw]) {
+    const colors = extractColorsFromText(clause)
+    if (!colors.length) continue
+    const sl = clause.toLowerCase()
+    const isRemove = /\b(ain|nathiwa|nathuwa|remove|without)\b/.test(sl)
+    const isWant =
+      /\b(eken|denna|want)\b/.test(sl) ||
+      (/\b(oni|onne|ganna|ganne)\b/.test(sl) && !isRemove)
+    if (isRemove) remove = colors[colors.length - 1]
+    if (isWant && !isRemove) want = colors[0]
+  }
+
+  // Fallback: first color = want, last = remove when both cues in one clause
+  if ((!want || !remove) && extractColorsFromText(raw).length >= 2) {
+    const all = extractColorsFromText(raw)
+    want = want || all[0]
+    remove = remove || all[all.length - 1]
+  }
+
+  if (
+    want &&
+    remove &&
+    normalizeMatchText(want) !== normalizeMatchText(remove)
+  ) {
+    return { want, remove }
+  }
+  return null
+}
+
+export function orderItemsToPendingQuoted(
+  items: Array<{
+    productId?: string | null
+    name?: string | null
+    color?: string | null
+    quantity?: number | null
+    price?: number | null
+    image?: string | null
+  }>,
+): OrderPendingQuotedItem[] {
+  return items
+    .filter((it) => it?.name)
+    .map((it) => ({
+      productId: typeof it.productId === 'string' ? it.productId : undefined,
+      name: String(it.name || 'Bag'),
+      color: String(it.color || ''),
+      qty: Math.max(1, Number(it.quantity) || 1),
+      price: Number(it.price) || 0,
+      image: typeof it.image === 'string' ? it.image : undefined,
+    }))
+}
+
+/** Recolor remove-color lines to want-color (same product merges qty). */
+export function applyColorSwapToPending(
+  items: OrderPendingQuotedItem[],
+  swap: { want: string; remove: string },
+): OrderPendingQuotedItem[] {
+  const wantN = normalizeMatchText(swap.want)
+  const removeN = normalizeMatchText(swap.remove)
+  const next: OrderPendingQuotedItem[] = []
+  let changed = false
+
+  for (const it of items) {
+    const c = normalizeMatchText(it.color || '')
+    if (c !== removeN) {
+      next.push({ ...it })
+      continue
+    }
+    changed = true
+    const qty = Math.max(1, Number(it.qty) || 1)
+    const idx = next.findIndex((n) => {
+      const sameProduct = it.productId
+        ? n.productId === it.productId
+        : normalizeMatchText(n.name) === normalizeMatchText(it.name)
+      return sameProduct && normalizeMatchText(n.color || '') === wantN
+    })
+    if (idx >= 0) {
+      next[idx] = {
+        ...next[idx],
+        color: swap.want,
+        qty: Math.max(1, Number(next[idx].qty) || 1) + qty,
+      }
+    } else {
+      next.push({ ...it, color: swap.want, qty })
+    }
+  }
+
+  return changed ? next : items
+}
+
 export type ResolvedCartLine = {
   productId: string
   name: string
@@ -857,6 +969,87 @@ export async function runCartPipeline(args: {
           ]
         : []
 
+  // After create_order, pending is empty — seed from live order so edits
+  // (color swap / remove / add) start from real order lines.
+  const recentOrder =
+    editOrderEnabled && args.contactPhone
+      ? await findRecentOrderForPhone(args.contactPhone)
+      : null
+  const colorSwap = burstText.trim()
+    ? parseColorSwapRequest(burstText)
+    : null
+  if (
+    !existingPending.length &&
+    recentOrder &&
+    (args.extraction.intent === 'edit_cart' || colorSwap)
+  ) {
+    const raw = Array.isArray(recentOrder.order.items)
+      ? (recentOrder.order.items as Array<{
+          productId?: string
+          name?: string
+          color?: string
+          quantity?: number
+          price?: number
+          image?: string
+        }>)
+      : []
+    existingPending = orderItemsToPendingQuoted(raw)
+  }
+
+  // Deterministic color swap ("white eken + brown ain") on live order / cart
+  if (colorSwap && existingPending.length && editOrderEnabled && recentOrder) {
+    const swapped = applyColorSwapToPending(existingPending, colorSwap)
+    if (swapped !== existingPending) {
+      const r = await actionUpdateOrderItems({
+        db,
+        accountId: args.accountId,
+        conversationId,
+        contactId: args.contactId,
+        configOwnerUserId: args.configOwnerUserId,
+        contactPhone: args.contactPhone,
+        orderId: recentOrder.id,
+        mode: 'replace',
+        items: swapped.map((l) => ({
+          productId: l.productId || '',
+          name: l.name,
+          color: l.color || '',
+          qty: l.qty,
+          price: l.price || 0,
+          image: l.image,
+        })),
+      })
+      return {
+        handled: r.ok,
+        quoted: false,
+        clarified: false,
+        updated: r.ok,
+        message: r.ok
+          ? `${r.message} (color swap ${colorSwap.remove}→${colorSwap.want})`
+          : r.message,
+        lines: pendingToResolved(swapped),
+      }
+    }
+  }
+  if (colorSwap && existingPending.length && !recentOrder) {
+    existingPending = applyColorSwapToPending(existingPending, colorSwap)
+    // Fall through to re-quote with swapped pending
+    args = {
+      ...args,
+      extraction: {
+        intent: 'edit_cart',
+        operation: 'set',
+        items: existingPending.map((it) => ({
+          productId: it.productId || null,
+          name: it.name,
+          mentioned: it.name,
+          qty: it.qty,
+          color: it.color || null,
+          confidence: 1,
+        })),
+        target: { mentioned: null, color: colorSwap.want },
+      },
+    }
+  }
   // Color-only reply ("Black" / "Black color") while a bag awaits color.
   const colorOnly = burstText.trim()
     ? parseColorOnlyReply(burstText)
@@ -1158,7 +1351,7 @@ export async function runCartPipeline(args: {
 
   // Live order edit path
   if (extraction.intent === 'edit_cart' && editOrderEnabled) {
-    const recent = await findRecentOrderForPhone(args.contactPhone)
+    const recent = recentOrder || (await findRecentOrderForPhone(args.contactPhone))
     if (recent) {
       const mode =
         operation === 'set' || operation === 'replace_qty'

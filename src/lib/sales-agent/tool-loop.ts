@@ -46,7 +46,7 @@ const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 
 /** Max model↔tool rounds per inbound handle (identify → quote → FAQ, etc.). */
-const MAX_TOOL_ROUNDS = 3
+const MAX_TOOL_ROUNDS = 5
 
 export interface ToolLoopArgs {
   db: SupabaseClient
@@ -136,7 +136,8 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
     'You handle FAQ, identify (photos), address→create_order, tracking, and handoff.',
     'IMPORTANT: You do NOT choose products, prices, or build quotations/carts. A separate server pipeline extracts cart intent and sends quotations deterministically.',
     'You MAY call multiple tools in the same turn for mixed intents (e.g. identify_product + answer_delivery).',
-    'You have up to 3 tool rounds this turn. If a tool returns need=quick_reply_id or "not found", pick a better id from the FAQ list and retry — or call handover_to_human.',
+    'You have up to 5 tool rounds this turn — think, call a tool, read the result, then call again to verify or finish (e.g. check order lines after an edit). If a tool returns need=quick_reply_id or "not found", pick a better id from the FAQ list and retry — or call handover_to_human.',
+    'Session state lists SELECTED BAGS (pre-order cart) and/or CURRENT LIVE ORDER lines when present — use those as ground truth for what the customer already chose.',
     'Prefer tools over guessing. Never invent catalog prices, delivery times, or return policies.',
     'Product catalog (from ladiesbags.lk admin): bag names and available colors for context only — prices are server-owned.',
     '- FAQ / delivery / policy answers:',

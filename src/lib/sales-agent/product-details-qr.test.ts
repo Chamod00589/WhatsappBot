@@ -29,6 +29,12 @@ describe('isProductDetailsOrColorsAsk', () => {
     ).toBe(true)
   })
 
+  it('detects cloudy photos ewanawada as details ask', () => {
+    expect(
+      isProductDetailsOrColorsAsk('Cloudy bag eketh photos ewanawada'),
+    ).toBe(true)
+  })
+
   it('does not treat price ask as details ask', () => {
     expect(isProductDetailsOrColorsAsk('Cloudy brown bag dekak oni')).toBe(
       false,

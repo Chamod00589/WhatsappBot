@@ -23,7 +23,13 @@ export function isProductDetailsOrColorsAsk(text: string): boolean {
 
   const detailsAsk =
     /\b(details?|detail|info|information|photos?|images?|pics?)\b/.test(t) &&
-    /\b(bag|bags|eka|meka|me|product)\b/.test(t)
+    /\b(bag|bags|eka|eketh|ekath|meka|me|product)\b/.test(t)
+
+  // "photos ewanawada / images denna" without a buy/price ask
+  const sendPhotosAsk =
+    /\b(photos?|images?|pics?)\b/.test(t) &&
+    /\b(ewanawada|ewanna|penna|pennanna|send|show)\b/.test(t) &&
+    !/\b(price|prices|kochchara|quotation|quote|ganna\s+oni)\b/.test(t)
 
   const showBagAsk =
     /\b(bag|bags)\b/.test(t) &&
@@ -35,7 +41,7 @@ export function isProductDetailsOrColorsAsk(text: string): boolean {
     /\b(me|meka|meeke|me\s*bag|meka\s*bag)\b/.test(t) &&
     /\b(colors?|colours?|pata|details?)\b/.test(t)
 
-  return colorAsk || detailsAsk || showBagAsk || meBagColors
+  return colorAsk || detailsAsk || sendPhotosAsk || showBagAsk || meBagColors
 }
 
 /**

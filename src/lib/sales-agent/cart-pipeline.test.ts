@@ -3,6 +3,7 @@ import { parseCartIntentJson } from './cart-intent-extract'
 import {
   applyCartOperationToPending,
   applyColorOnlyToPending,
+  applyColorSwapToPending,
   canonicalizeExtractedColor,
   checkQuoteCompleteness,
   coerceCartOperation,
@@ -10,6 +11,7 @@ import {
   heuristicLinesFromText,
   looksLikeAbsoluteQtyDesire,
   mergePhotoPendingIntoResolved,
+  parseColorSwapRequest,
   resolveExtractionItems,
   resolveMentionedProduct,
   validateProductColor,
@@ -606,5 +608,41 @@ describe('buildProductNeedles with curated aliases', () => {
     ])
     expect(needles.some((n) => n.includes('podi'))).toBe(true)
     expect(needles.some((n) => n === 'mini' || n.includes('mini'))).toBe(true)
+  })
+})
+
+describe('color swap brown→white', () => {
+  it('parses Singlish want + remove colors', () => {
+    const swap = parseColorSwapRequest(
+      'Mata white color eken oni. Meke brown color eka ain karanna',
+    )
+    expect(swap?.want.toLowerCase()).toBe('white')
+    expect(swap?.remove.toLowerCase()).toBe('brown')
+  })
+
+  it('recolors brown lines to white and keeps other bags', () => {
+    const next = applyColorSwapToPending(
+      [
+        {
+          productId: 'bloom-1',
+          name: 'Bloom',
+          color: 'White',
+          qty: 2,
+          price: 1000,
+        },
+        {
+          productId: 'cloudy-1',
+          name: 'Cloudy',
+          color: 'Brown',
+          qty: 1,
+          price: 990,
+        },
+      ],
+      { want: 'White', remove: 'Brown' },
+    )
+    expect(next).toHaveLength(2)
+    expect(next.find((l) => l.productId === 'bloom-1')?.qty).toBe(2)
+    expect(next.find((l) => l.productId === 'cloudy-1')?.color).toBe('White')
+    expect(next.find((l) => l.productId === 'cloudy-1')?.qty).toBe(1)
   })
 })

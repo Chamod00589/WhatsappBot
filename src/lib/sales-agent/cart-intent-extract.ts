@@ -121,18 +121,22 @@ Rules:
 - Keep each bag/color as a SEPARATE items[] row — do NOT merge. Same bag in two colors = two items.
 - Example: "Cloudy white 2i black 1k" → two items: Cloudy White qty 2 + Cloudy Black qty 1 (same productId, different colors).
 - confidence = how sure the catalog match is (0-1). Use ≥0.9 when productId is clear.
-- intent=quotation when they ask price / kochchara / quote / want bags.
-- intent=edit_cart when they add/remove/change qty/color on an existing cart, OR reply with ONLY a color ("Black", "Black color") after being asked — then set target.color and items may be empty.
-- intent=none for FAQ, delivery time, greetings, address-only, unrelated chat.
+- intent=quotation when they ask price / kochchara / quote / want bags to buy.
+- intent=edit_cart when they add/remove/change qty/color on an existing cart OR on CURRENT LIVE ORDER lines listed in Session state. Prefer productId/name/color from those selected bags / live order lines — never invent bags from unrelated screenshots.
+- intent=none for FAQ, delivery time, greetings, address-only, unrelated chat, OR when they only ask for photos / colors / details / info of a bag (server sends the product card — do NOT quote).
+- Example: "Cloudy bag eketh photos ewanawada" → intent=none (photos ask).
+- Example: Session has CURRENT LIVE ORDER Cloudy Brown x1 + Bloom White x2; customer "white eken oni, brown ain karanna" → intent=edit_cart, remove Brown (or recolor that line to White), keep other lines — use live order productIds.
 - operation meanings (critical — wrong op doubles qty):
   - set = new quote / replace whole cart with items[]
-  - add = ADD extra bags ("white bag ekakuth", "thawa pink 1k", "another black")
+  - add = ADD extra bags ("white bag ekakuth", "thawa pink 1k", "me bag ekath denna", "another black"). qty = pieces to ADD (default 1), NOT a new cart total.
   - add_qty = increase qty by N ("thawa ekak", "one more") without stating a final total
   - replace_qty = SET qty to the number they stated for a bag already in cart ("Pink bag 2i oni", "pink 2k denna", "qty eka 2"). Use this when they restate how many they want — NEVER add in that case.
-  - remove = drop a bag/color from cart
+  - remove = drop a bag/color from cart or live order
 - Example bug to avoid: cart already has Pink qty 2; customer says "Pink bag 2i oni. Meke 4k thiynawane" → operation=replace_qty, qty=2 (NOT add — add would make 4).
+- Example bug to avoid: swipe-reply "Me bag ekath denna" → operation=add, items=[that bag qty 1] only (do NOT list the whole prior cart again).
 - Prices in the catalog are for your understanding only — do NOT invent different prices; the server will quote from the database.
 - Never invent productIds or colors not listed for that product.
+- When Session lists SELECTED BAGS or CURRENT LIVE ORDER, treat those as the customer's current selection for edit/add/remove.
 
 CATALOG (select ONLY from here):
 ${catalogBlock || '(empty catalog)'}

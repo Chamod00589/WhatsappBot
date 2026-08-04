@@ -1,4 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { identifyInboundImage } from './identify'
+import { extractExplicitQty } from './order-intent'
+import { normalizeMatchText } from './normalize'
+import { CONTEXT_BLURBS } from './types'
 import {
   fetchCatalogProduct,
   fetchCatalogProducts,
@@ -7,9 +11,7 @@ import {
   type CatalogProduct,
 } from '@/lib/catalog/products'
 import { catalogImageForColor } from '@/lib/orders/catalog-helpers'
-import { identifyInboundImage } from './identify'
-import { extractExplicitQty } from './order-intent'
-import { normalizeMatchText } from './normalize'
+import { isAddToOrderRequest } from './order-edit-intent'
 
 export type ReplyReferenceBag = {
   productName: string
@@ -57,6 +59,12 @@ export async function resolveReplyReference(args: {
       : null
   const contentText =
     typeof msg.content_text === 'string' ? msg.content_text.trim() : ''
+
+  // Quotation / order-confirm cards are multi-bag composites — never
+  // vision-identify them into a single wrong bag (e.g. Tape Bag).
+  if (isCompositeOrderCardSummary(summary)) {
+    return null
+  }
 
   // 1) Match replied image URL to a catalog color slot (fast, exact)
   if (mediaUrl && msg.content_type === 'image') {
@@ -271,6 +279,29 @@ export async function applyReplyReferenceToPending(args: {
       image,
     },
   ])
+}
+
+/** True when swipe target is a quotation / order-confirm screenshot. */
+export function isCompositeOrderCardSummary(
+  summary: string | null | undefined,
+): boolean {
+  const s = (summary || '').trim().toLowerCase()
+  if (!s) return false
+  if (s === CONTEXT_BLURBS.orderConfirm.toLowerCase()) return true
+  if (s === CONTEXT_BLURBS.quotation.toLowerCase()) return true
+  if (s.includes('order confirm')) return true
+  if (s.includes('quotation msg')) return true
+  return false
+}
+
+/**
+ * Persist reply-ref into pending only for color picks — never for
+ * "me bag ekath denna" (add), which would double-count with cart extract.
+ */
+export function shouldApplyReplyRefToPending(text: string): boolean {
+  if (!text.trim()) return false
+  if (isAddToOrderRequest(text)) return false
+  return looksLikeReplyColorAsk(text)
 }
 
 /** True when customer text points at the swipe-replied media ("me color"). */
