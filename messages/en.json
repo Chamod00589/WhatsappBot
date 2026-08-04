@@ -179,7 +179,14 @@
       "deleteChatConfirm": "Delete chat",
       "deleteChatCancel": "Cancel",
       "toastChatDeleted": "Chat deleted",
-      "toastChatDeleteFailed": "Failed to delete chat"
+      "toastChatDeleteFailed": "Failed to delete chat",
+      "clearAgentHistory": "Clear agent history",
+      "clearAgentHistoryTitle": "Clear Sales Agent history?",
+      "clearAgentHistoryDescription": "Resets bag/quote memory and treats this chat as new for the AI (same as sending ***). Messages stay visible — only agent memory is cleared.",
+      "clearAgentHistoryConfirm": "Clear history",
+      "clearAgentHistoryCancel": "Cancel",
+      "toastAgentHistoryCleared": "Agent history cleared",
+      "toastAgentHistoryClearFailed": "Failed to clear agent history"
     },
     "sessionTimer": {
       "expired": "Expired",

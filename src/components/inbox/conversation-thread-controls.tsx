@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
+  Eraser,
   Loader2,
   RefreshCw,
   Trash2,
@@ -60,14 +61,16 @@ export interface ConversationThreadControlsProps {
   onRefresh?: () => void;
   /** Called after the chat (messages + media) was hard-deleted. */
   onDeleted?: (conversationId: string) => void;
+  /** After agent history reset — refresh the thread to show the marker. */
+  onAgentHistoryCleared?: (conversationId: string) => void;
   /** `row` stacks controls for the contact panel; `inline` for the header. */
   layout?: "inline" | "row";
   className?: string;
 }
 
 /**
- * Status / assign / refresh / delete controls shared by the thread header
- * (desktop) and the contact panel (mobile sheet).
+ * Status / assign / refresh / clear-agent / delete controls shared by the
+ * thread header (desktop) and the contact panel (mobile sheet).
  */
 export function ConversationThreadControls({
   conversationId,
@@ -77,17 +80,20 @@ export function ConversationThreadControls({
   onAssignChange,
   onRefresh,
   onDeleted,
+  onAgentHistoryCleared,
   layout = "inline",
   className,
 }: ConversationThreadControlsProps) {
   const t = useTranslations("Inbox.messageThread");
   const { user } = useAuth();
-  const canDelete = useCan("send-messages");
+  const canAct = useCan("send-messages");
   const { getPresence, getRow, now } = usePresence();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -182,6 +188,34 @@ export function ConversationThreadControls({
       setDeleting(false);
     }
   }, [conversationId, deleting, onDeleted, t]);
+
+  const handleClearAgentHistory = useCallback(async () => {
+    if (clearing) return;
+    setClearing(true);
+    try {
+      const res = await fetch(
+        `/api/conversations/${conversationId}/reset-agent`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(body?.error || t("toastAgentHistoryClearFailed"));
+      }
+      setClearOpen(false);
+      toast.success(t("toastAgentHistoryCleared"));
+      onAgentHistoryCleared?.(conversationId);
+      onRefresh?.();
+    } catch (err) {
+      console.error("Failed to clear agent history:", err);
+      toast.error(
+        err instanceof Error ? err.message : t("toastAgentHistoryClearFailed"),
+      );
+    } finally {
+      setClearing(false);
+    }
+  }, [clearing, conversationId, onAgentHistoryCleared, onRefresh, t]);
 
   const currentStatus = STATUS_OPTIONS.find((s) => s.value === status);
   const currentAssignee = profiles.find((p) => p.user_id === assignedAgentId);
@@ -307,7 +341,24 @@ export function ConversationThreadControls({
         type="button"
         variant="ghost"
         size="sm"
-        canAct={canDelete}
+        canAct={canAct}
+        gateReason="clear agent history"
+        onClick={() => setClearOpen(true)}
+        title={t("clearAgentHistory")}
+        className={cn(
+          "text-muted-foreground hover:bg-muted hover:text-foreground",
+          isRow ? "h-9 w-full justify-center gap-2 px-3 text-xs" : "h-7 w-7 px-0",
+        )}
+      >
+        <Eraser className="h-3.5 w-3.5" />
+        {isRow ? <span>{t("clearAgentHistory")}</span> : null}
+      </GatedButton>
+
+      <GatedButton
+        type="button"
+        variant="ghost"
+        size="sm"
+        canAct={canAct}
         gateReason="delete chats"
         onClick={() => setDeleteOpen(true)}
         title={t("deleteChat")}
@@ -319,6 +370,35 @@ export function ConversationThreadControls({
         <Trash2 className="h-3.5 w-3.5" />
         {isRow ? <span>{t("deleteChat")}</span> : null}
       </GatedButton>
+
+      <Dialog open={clearOpen} onOpenChange={setClearOpen}>
+        <DialogContent className="bg-popover border-border text-popover-foreground sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("clearAgentHistoryTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("clearAgentHistoryDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={clearing}
+              onClick={() => setClearOpen(false)}
+            >
+              {t("clearAgentHistoryCancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={clearing}
+              onClick={() => void handleClearAgentHistory()}
+            >
+              {clearing && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              {t("clearAgentHistoryConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent className="bg-popover border-border text-popover-foreground sm:max-w-sm">

@@ -50,13 +50,13 @@ export async function buildSalesAgentContext(
   const customerTexts: string[] = []
 
   for (const m of rows) {
-    // Skip the marker message body itself from assistant context noise
-    if (
-      m.sender_type === 'customer' &&
-      m.content_text?.includes(TEST_MARKER) &&
-      stripKeepAfterMarker(m.content_text) === ''
-    ) {
-      continue
+    // Skip reset markers from LLM context (customer *** alone, or inbox Clear).
+    if (m.content_text?.includes(TEST_MARKER)) {
+      if (m.sender_type === 'customer') {
+        if (stripKeepAfterMarker(m.content_text) === '') continue
+      } else {
+        continue
+      }
     }
 
     const role: 'user' | 'assistant' =

@@ -49,8 +49,10 @@ export async function contactHasHumanTag(
 }
 
 /**
- * Find the latest customer message containing *** and return its created_at
+ * Find the latest message containing *** and return its created_at
  * so context builders can ignore earlier history (test reset marker).
+ * Accepts customer inbound *** OR an agent/bot manual reset message
+ * (inbox button) — Meta sometimes delivers bare *** as an unsupported type.
  */
 export async function findTestMarkerCutoff(
   db: SupabaseClient,
@@ -58,15 +60,19 @@ export async function findTestMarkerCutoff(
 ): Promise<string | null> {
   const { data } = await db
     .from('messages')
-    .select('created_at, content_text')
+    .select('created_at, content_text, ai_context_summary')
     .eq('conversation_id', conversationId)
-    .eq('sender_type', 'customer')
     .order('created_at', { ascending: false })
-    .limit(40)
+    .limit(60)
 
   if (!data) return null
-  for (const row of data as { created_at: string; content_text: string | null }[]) {
-    if (row.content_text && row.content_text.includes(TEST_MARKER)) {
+  for (const row of data as {
+    created_at: string
+    content_text: string | null
+    ai_context_summary: string | null
+  }[]) {
+    const text = `${row.content_text || ''}\n${row.ai_context_summary || ''}`
+    if (text.includes(TEST_MARKER)) {
       return row.created_at
     }
   }
