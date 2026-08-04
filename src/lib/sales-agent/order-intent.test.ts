@@ -154,6 +154,19 @@ Deweni piyawara
     expect(isAddressLikeMessage(bare)).toBe(true)
   })
 
+  it('detects labeled address form even when bag edit text is appended', () => {
+    const burst = `මිලදී ගැනීම සඳහා කරුණාකර පහත විස්තර අප වෙත එවන්න. 😊
+
+📌 නම:Chamod 
+📌 ලිපිනය: no 280, uttalapura, damanewela 
+📌 ළඟම නගරය: dehiattakandiya 
+📌 දුරකථන අංකය 01:0779522100
+📌 දුරකථන අංකය 02 (ඇත්නම්):
+
+White bag ekakuth ewanna`
+    expect(isAddressLikeMessage(burst)).toBe(true)
+  })
+
   it('prefers bag+color from chat history over offered when address follows', () => {
     const intents = resolveOrderIntentsForAddress({
       customerTexts: [

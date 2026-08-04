@@ -7,6 +7,7 @@ import {
   actionMarkHuman,
   actionSendQuotation,
   actionSendTracking,
+  isAddressLikeMessage,
 } from './actions/orders'
 import { maybeConfirmOrderTag } from './confirm-order-tag'
 import {
@@ -420,6 +421,20 @@ async function execGenerateQuote(
     }
   }
 
+  // Address turn → create_order sends confirm (includes prices). Never quote+confirm.
+  if (isAddressLikeMessage(ctx.burstText)) {
+    return {
+      replied: false,
+      handoff: false,
+      note: 'address present — call create_order (do not send quotation)',
+      resultPayload: {
+        ok: false,
+        skip_quotation: true,
+        use: 'create_order',
+      },
+    }
+  }
+
   let items = await resolveItemsArg(ctx, a.items)
   if (!items.length) {
     items = await loadPendingItems(ctx)
@@ -471,6 +486,10 @@ async function maybeAutoQuoteAfterIdentify(
   items: OrderLineItem[],
 ): Promise<{ ok: boolean; message: string } | null> {
   if (!ctx.quotationEnabled || ctx.quoteSentThisTurn || !items.length) {
+    return null
+  }
+  // Address in the same turn → create_order owns the customer-facing card.
+  if (isAddressLikeMessage(ctx.burstText)) {
     return null
   }
   const r = await tryDeterministicQuote({
@@ -603,16 +622,21 @@ async function execUpdateOrder(
       items: items.length ? items : undefined,
       color,
       targetName,
+      // Same-turn address → create_order will send confirm; do not also quote.
+      sendQuotation: !isAddressLikeMessage(ctx.burstText),
     })
     return {
-      replied: r.ok,
+      replied: r.ok && !isAddressLikeMessage(ctx.burstText),
       handoff: false,
       note: r.message,
       resultPayload: {
         ok: r.ok,
-        scope: 'quotation',
+        scope: isAddressLikeMessage(ctx.burstText) ? 'pending_only' : 'quotation',
         mode,
         items: r.items,
+        ...(isAddressLikeMessage(ctx.burstText)
+          ? { next: 'create_order' }
+          : {}),
       },
     }
   }

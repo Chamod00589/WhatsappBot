@@ -429,6 +429,9 @@ export async function dispatchSalesAgentNow(
             systemExtra = [
               systemExtra,
               `Cart pipeline already handled this turn: quoted=${pipe.quoted} clarified=${pipe.clarified} updated=${pipe.updated}. Do not invent products/prices. Continue only for FAQ, identify images, address→create_order, tracking, or handoff.`,
+              pipe.updated && !pipe.quoted && isAddressLikeMessage(burstText)
+                ? 'Customer sent address this turn — cart was saved WITHOUT a quotation. Call create_order with address_text only. Do NOT call generate_quote / send another quotation. Order confirm includes bags, prices, and shipping.'
+                : '',
             ]
               .filter(Boolean)
               .join('\n\n')

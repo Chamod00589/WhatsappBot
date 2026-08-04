@@ -5,8 +5,10 @@ import {
   applyColorOnlyToPending,
   canonicalizeExtractedColor,
   checkQuoteCompleteness,
+  coerceCartOperation,
   combineConfidence,
   heuristicLinesFromText,
+  looksLikeAbsoluteQtyDesire,
   resolveExtractionItems,
   resolveMentionedProduct,
   validateProductColor,
@@ -221,6 +223,154 @@ describe('cart ops + completeness', () => {
       'add_qty',
     )
     expect(next[0].qty).toBe(3)
+  })
+
+  it('replace_qty sets absolute qty on matching color line', () => {
+    const existing = [
+      {
+        productId: 'mini-1',
+        name: 'Mini Shoulder Bag',
+        color: 'Pink',
+        qty: 2,
+        price: 990,
+      },
+      {
+        productId: 'mini-1',
+        name: 'Mini Shoulder Bag',
+        color: 'White',
+        qty: 1,
+        price: 990,
+      },
+    ]
+    const next = applyCartOperationToPending(
+      existing,
+      [
+        {
+          productId: 'mini-1',
+          name: 'Mini Shoulder Bag',
+          color: 'Pink',
+          qty: 2,
+          confidence: 0.95,
+        },
+      ],
+      'replace_qty',
+      { productId: 'mini-1', color: 'Pink' },
+    )
+    expect(next).toHaveLength(2)
+    expect(next.find((i) => i.color === 'Pink')?.qty).toBe(2)
+    expect(next.find((i) => i.color === 'White')?.qty).toBe(1)
+  })
+
+  it('coerces LLM add → replace_qty for "Pink bag 2i oni" when pink already in cart', () => {
+    const burst = 'Pink bag 2i oni. Meke 4k thiynawane'
+    expect(looksLikeAbsoluteQtyDesire(burst)).toBe(true)
+    expect(
+      coerceCartOperation({
+        burstText: burst,
+        operation: 'add',
+        intent: 'edit_cart',
+        existing: [
+          {
+            productId: 'mini-1',
+            name: 'Mini Shoulder Bag',
+            color: 'Pink',
+            qty: 2,
+            price: 990,
+          },
+          {
+            productId: 'mini-1',
+            name: 'Mini Shoulder Bag',
+            color: 'White',
+            qty: 1,
+            price: 990,
+          },
+        ],
+        incoming: [
+          {
+            productId: 'mini-1',
+            name: 'Mini Shoulder Bag',
+            color: 'Pink',
+            qty: 2,
+            confidence: 0.95,
+          },
+        ],
+      }),
+    ).toBe('replace_qty')
+
+    const coerced = coerceCartOperation({
+      burstText: burst,
+      operation: 'add',
+      intent: 'edit_cart',
+      existing: [
+        {
+          productId: 'mini-1',
+          name: 'Mini Shoulder Bag',
+          color: 'Pink',
+          qty: 2,
+          price: 990,
+        },
+      ],
+      incoming: [
+        {
+          productId: 'mini-1',
+          name: 'Mini Shoulder Bag',
+          color: 'Pink',
+          qty: 2,
+          confidence: 0.95,
+        },
+      ],
+    })
+    const next = applyCartOperationToPending(
+      [
+        {
+          productId: 'mini-1',
+          name: 'Mini Shoulder Bag',
+          color: 'Pink',
+          qty: 2,
+          price: 990,
+        },
+      ],
+      [
+        {
+          productId: 'mini-1',
+          name: 'Mini Shoulder Bag',
+          color: 'Pink',
+          qty: 2,
+          confidence: 0.95,
+        },
+      ],
+      coerced,
+    )
+    // Must stay 2 — not become 4 from add-merge
+    expect(next[0].qty).toBe(2)
+  })
+
+  it('keeps add for ekakuth / thawa language', () => {
+    expect(
+      coerceCartOperation({
+        burstText: 'White bag ekakuth ewanna',
+        operation: 'add',
+        intent: 'edit_cart',
+        existing: [
+          {
+            productId: 'mini-1',
+            name: 'Mini Shoulder Bag',
+            color: 'Pink',
+            qty: 2,
+            price: 990,
+          },
+        ],
+        incoming: [
+          {
+            productId: 'mini-1',
+            name: 'Mini Shoulder Bag',
+            color: 'White',
+            qty: 1,
+            confidence: 0.95,
+          },
+        ],
+      }),
+    ).toBe('add')
   })
 
   it('remove drops the target line', () => {

@@ -75,7 +75,7 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
       function: {
         name: 'create_order',
         description:
-          'Create a ladiesbags order when the customer provided delivery name/address/phone. Bags/colors/qty MUST already be saved in session state from the quotation pipeline — do not pass product lines. Pass only the raw address message.',
+          'Create a ladiesbags order when the customer provided delivery name/address/phone. Bags/colors/qty MUST already be saved in session state from the quotation pipeline — do not pass product lines. Pass only the raw address message. When creating an order, do NOT also generate a quotation — the order confirm card includes bags, prices, and shipping.',
         parameters: {
           type: 'object',
           properties: {

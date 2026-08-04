@@ -1,11 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { OrderLineItem } from '@/lib/orders/constants'
 import { engineSendText } from '@/lib/flows/meta-send'
-import { actionSendQuotation } from './actions/orders'
+import { actionSendQuotation, isAddressLikeMessage } from './actions/orders'
 import {
   actionUpdateOrderItems,
   actionUpdatePendingQuotation,
   findRecentOrderForPhone,
+  isAddToOrderRequest,
 } from './order-edit-intent'
 import type {
   CartIntentExtraction,
@@ -235,31 +236,141 @@ export function applyCartOperationToPending(
   }
 
   if (op === 'add_qty' || op === 'replace_qty' || op === 'remove') {
-    let targetIdx = findTargetIndex(existing, target, incoming)
-    if (targetIdx < 0 && existing.length === 1) targetIdx = 0
-    if (targetIdx < 0) return existing
+    // Apply per incoming line so "Pink 2 + White 1" corrections update
+    // each matching cart row instead of only the first.
+    const lines =
+      incoming.length > 0
+        ? incoming
+        : [
+            {
+              productId: target?.productId || '',
+              name: '',
+              color: target?.color || null,
+              qty: 1,
+              confidence: 1,
+            } satisfies ResolvedCartLine,
+          ]
 
-    const copy = existing.map((e) => ({ ...e }))
-    if (op === 'remove') {
-      copy.splice(targetIdx, 1)
-      return copy
-    }
-    const delta = incoming[0]?.qty ?? 1
-    if (op === 'add_qty') {
-      copy[targetIdx] = {
-        ...copy[targetIdx],
-        qty: Math.max(1, Number(copy[targetIdx].qty) || 1) + delta,
+    let copy = existing.map((e) => ({ ...e }))
+    for (const line of lines) {
+      let targetIdx = findTargetIndex(copy, target, [line])
+      if (targetIdx < 0 && copy.length === 1) targetIdx = 0
+      if (targetIdx < 0) continue
+
+      if (op === 'remove') {
+        copy.splice(targetIdx, 1)
+        continue
       }
-    } else {
-      copy[targetIdx] = {
-        ...copy[targetIdx],
-        qty: Math.max(1, delta),
+      const delta = Math.max(1, Number(line.qty) || 1)
+      if (op === 'add_qty') {
+        copy[targetIdx] = {
+          ...copy[targetIdx],
+          qty: Math.max(1, Number(copy[targetIdx].qty) || 1) + delta,
+        }
+      } else {
+        copy[targetIdx] = {
+          ...copy[targetIdx],
+          qty: delta,
+        }
       }
     }
     return copy
   }
 
   return existing
+}
+
+/**
+ * True when the customer states an absolute desired qty (or complains the
+ * current count is wrong) — NOT "add one more".
+ * Examples: "Pink bag 2i oni", "2k denna", "Meke 4k thiynawane".
+ */
+export function looksLikeAbsoluteQtyDesire(text: string): boolean {
+  const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (!t) return false
+  // Explicit additive language → not an absolute set
+  if (isAddToOrderRequest(t)) return false
+  // 2i / 2k / 2kui / 2 pcs
+  if (/\b\d+\s*[ik]\b/.test(t)) return true
+  if (/\b\d+\s*(kui|pieces?|pcs?)\b/.test(t)) return true
+  // Singlish number words used as desired counts
+  if (/\b(ekak|dekak|thunak|hatarak|pahak)\b/.test(t)) return true
+  if (/\b\d+\s*(oni|onne|denna|karanna|want)\b/.test(t)) return true
+  if (/\b(oni|onne|want)\b/.test(t) && /\d/.test(t)) return true
+  // Complaint that cart shows the wrong count
+  if (
+    /\b(thiynawane|thiyenawa|thiyenne|thiyanawa|wrong|hari\s*na|incorrect)\b/.test(
+      t,
+    ) &&
+    /\d/.test(t)
+  ) {
+    return true
+  }
+  return false
+}
+
+function pendingLineOverlapsIncoming(
+  existing: OrderPendingQuotedItem[],
+  incoming: ResolvedCartLine[],
+): boolean {
+  return incoming.some((line) => {
+    if (!line.productId) return false
+    const wantColor = normalizeMatchText(line.color || '')
+    return existing.some((e) => {
+      if (e.productId !== line.productId) return false
+      if (!wantColor) return true
+      return normalizeMatchText(e.color) === wantColor
+    })
+  })
+}
+
+/**
+ * Fix LLM mistakes like edit_cart + operation=add on "Pink bag 2i oni"
+ * (would SUM onto existing pink and create qty 4). Absolute qty for a
+ * line already in the cart → replace_qty; explicit "ekakuth/thawa" → add.
+ */
+export function coerceCartOperation(args: {
+  burstText: string
+  operation: CartOperation
+  intent: CartIntentExtraction['intent']
+  existing: OrderPendingQuotedItem[]
+  incoming: ResolvedCartLine[]
+}): CartOperation {
+  const {
+    burstText,
+    intent,
+    existing,
+    incoming,
+  } = args
+  let op =
+    args.operation ||
+    (intent === 'edit_cart' ? 'add' : intent === 'quotation' ? 'set' : null)
+
+  if (!op) return op
+
+  const additive = isAddToOrderRequest(burstText)
+  const absolute = looksLikeAbsoluteQtyDesire(burstText)
+  const overlaps =
+    existing.length > 0 &&
+    incoming.length > 0 &&
+    pendingLineOverlapsIncoming(existing, incoming)
+
+  // Restating desired qty for a bag already in cart must SET, not SUM.
+  if (
+    overlaps &&
+    absolute &&
+    !additive &&
+    (op === 'add' || op === 'add_qty')
+  ) {
+    return 'replace_qty'
+  }
+
+  // Explicit "ekakuth / thawa / add" keeps additive merge.
+  if (additive && (op === 'set' || op === 'replace_qty')) {
+    return 'add'
+  }
+
+  return op
 }
 
 function findTargetIndex(
@@ -882,9 +993,13 @@ export async function runCartPipeline(args: {
     }
   }
 
-  const operation: CartOperation =
-    extraction.operation ||
-    (extraction.intent === 'edit_cart' ? 'add' : 'set')
+  const operation: CartOperation = coerceCartOperation({
+    burstText,
+    operation: extraction.operation,
+    intent: extraction.intent,
+    existing: existingPending,
+    incoming: resolved,
+  })
 
   // Resolve target productId from extraction.target
   let targetPid: string | null = null
@@ -1114,6 +1229,22 @@ export async function runCartPipeline(args: {
     }
   }
 
+  // Address + bags in the same turn → save cart only. create_order sends
+  // the order-confirm card (prices/shipping included). Never send quotation
+  // and order-confirm together.
+  if (isAddressLikeMessage(burstText)) {
+    await savePendingQuotedItems(db, conversationId, priced)
+    return {
+      handled: true,
+      quoted: false,
+      clarified: false,
+      updated: true,
+      message:
+        'Address in burst — saved cart without quotation (create_order should send confirm only)',
+      lines: workingLines,
+    }
+  }
+
   // Prefer update pending quotation when editing existing quote
   if (extraction.intent === 'edit_cart' && existingPending.length) {
     const mode =
@@ -1158,6 +1289,31 @@ export async function runCartPipeline(args: {
     message: r.message,
     lines: workingLines,
   }
+}
+
+/** Persist cart lines without sending a quotation screenshot. */
+export async function savePendingQuotedItems(
+  db: SupabaseClient,
+  conversationId: string,
+  items: OrderLineItem[],
+): Promise<void> {
+  await db
+    .from('conversations')
+    .update({
+      sa_order_pending: {
+        type: 'awaiting_address',
+        items: items.map((it) => ({
+          productId: it.productId,
+          name: it.name,
+          color: it.color || '',
+          qty: it.qty,
+          price: it.price,
+          image: it.image,
+        })),
+        askedAt: new Date().toISOString(),
+      },
+    })
+    .eq('id', conversationId)
 }
 
 /**

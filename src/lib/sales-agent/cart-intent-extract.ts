@@ -122,7 +122,13 @@ Rules:
 - intent=quotation when they ask price / kochchara / quote / want bags.
 - intent=edit_cart when they add/remove/change qty/color on an existing cart, OR reply with ONLY a color ("Black", "Black color") after being asked — then set target.color and items may be empty.
 - intent=none for FAQ, delivery time, greetings, address-only, unrelated chat.
-- operation: set | add | add_qty | replace_qty | remove | null
+- operation meanings (critical — wrong op doubles qty):
+  - set = new quote / replace whole cart with items[]
+  - add = ADD extra bags ("white bag ekakuth", "thawa pink 1k", "another black")
+  - add_qty = increase qty by N ("thawa ekak", "one more") without stating a final total
+  - replace_qty = SET qty to the number they stated for a bag already in cart ("Pink bag 2i oni", "pink 2k denna", "qty eka 2"). Use this when they restate how many they want — NEVER add in that case.
+  - remove = drop a bag/color from cart
+- Example bug to avoid: cart already has Pink qty 2; customer says "Pink bag 2i oni. Meke 4k thiynawane" → operation=replace_qty, qty=2 (NOT add — add would make 4).
 - Prices in the catalog are for your understanding only — do NOT invent different prices; the server will quote from the database.
 - Never invent productIds or colors not listed for that product.
 

@@ -513,6 +513,11 @@ export async function actionUpdatePendingQuotation(args: {
   items?: OrderLineItem[]
   color?: string | null
   targetName?: string | null
+  /**
+   * When false, only persist sa_order_pending (no quotation screenshot).
+   * Used when the same burst also creates an order — confirm card is enough.
+   */
+  sendQuotation?: boolean
 }): Promise<{ ok: boolean; message: string; items?: OrderLineItem[] }> {
   const {
     db,
@@ -525,6 +530,7 @@ export async function actionUpdatePendingQuotation(args: {
     color,
     targetName,
   } = args
+  const sendQuotation = args.sendQuotation !== false
 
   const { data } = await db
     .from('conversations')
@@ -626,6 +632,32 @@ export async function actionUpdatePendingQuotation(args: {
   )
 
   const hadQuote = base.length > 0
+
+  if (!sendQuotation) {
+    await db
+      .from('conversations')
+      .update({
+        sa_order_pending: {
+          type: 'awaiting_address',
+          items: lineItems.map((it) => ({
+            productId: it.productId,
+            name: it.name,
+            color: it.color || '',
+            qty: it.qty,
+            price: it.price,
+            image: it.image,
+          })),
+          askedAt: new Date().toISOString(),
+        },
+      })
+      .eq('id', conversationId)
+    return {
+      ok: true,
+      message: 'Saved cart without quotation (order confirm will include totals)',
+      items: lineItems,
+    }
+  }
+
   const r = await actionSendQuotation({
     db,
     accountId,
