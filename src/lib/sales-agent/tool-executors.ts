@@ -101,6 +101,7 @@ export async function executeAgentTool(
     case 'identify_product':
       return execIdentifyProduct(ctx, a)
     case 'find_product':
+      return execFindProduct(ctx, a)
     case 'generate_quote':
     case 'send_quotation':
     case 'update_order':

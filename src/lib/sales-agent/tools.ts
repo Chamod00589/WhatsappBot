@@ -38,6 +38,37 @@ export function buildSalesAgentTools(caps: AiConfigWithSales): ToolDef[] {
     })
   }
 
+  if (caps.productMatch) {
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'find_product',
+        description:
+          'Send the PRODUCT Details Quick Reply card (color photos, price, delivery, available colors) for a catalog bag. PRIORITY: use this when the customer asks which colors a bag has, bag details, photos, or "me bag eke colors". Prefer the bag from Session state / last quotation ("me bag"). Do NOT use answer_policy / custom FAQ for product color/details questions. Pass product_id or product_name from the catalog list.',
+        parameters: {
+          type: 'object',
+          properties: {
+            product_name: {
+              type: 'string',
+              description: 'Bag name, e.g. "Cloudy Shoulder Bag" or "Cloudy"',
+            },
+            product_id: { type: 'string' },
+            catalog_message_id: { type: 'string' },
+            quick_reply_id: { type: 'string' },
+            color: {
+              type: 'string',
+              description: 'Optional remembered color (does not change the QR images)',
+            },
+            quantity: {
+              type: 'number',
+              description: 'Optional qty to remember for later order',
+            },
+          },
+        },
+      },
+    })
+  }
+
   if (caps.createOrder) {
     tools.push({
       type: 'function',

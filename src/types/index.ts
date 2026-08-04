@@ -287,6 +287,21 @@ export interface Message {
    * Null for ordinary messages. Migration 046.
    */
   referral?: MessageReferral | null;
+  /**
+   * Soft-delete timestamp. When set, the inbox renders a WhatsApp-style
+   * "This message was deleted" tombstone. Migration 049.
+   * Meta Cloud API cannot revoke the message on the customer's phone.
+   */
+  deleted_at?: string | null;
+  /** Agent who soft-deleted; null for inbound revoke webhooks. */
+  deleted_by?: string | null;
+  /**
+   * When set, body/caption was edited. Inbox shows an "Edited" badge.
+   * Meta Cloud API cannot push edits to the customer's phone. Migration 050.
+   */
+  edited_at?: string | null;
+  /** Agent who edited; null for inbound edit webhooks. */
+  edited_by?: string | null;
 }
 
 export type ReactionActor = 'customer' | 'agent';

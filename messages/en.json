@@ -346,19 +346,44 @@
       "aiBadge": "AI",
       "aiBadgeTitle": "Sent automatically by the AI assistant",
       "adReferral": "Facebook ad",
-      "adReferralOpen": "Open ad"
+      "adReferralOpen": "Open ad",
+      "messageDeleted": "This message was deleted",
+      "edited": "Edited",
+      "editedTitle": "This message was edited"
     },
     "actions": {
       "reply": "Reply",
       "copyText": "Copy text",
       "useForOrder": "Use for order",
       "delete": "Delete",
+      "select": "Select",
+      "edit": "Edit",
       "react": "React",
       "reactWith": "React with {emoji}",
       "nothingToCopy": "Nothing to copy",
       "nothingForOrder": "No text to use for order",
       "copied": "Copied",
       "copyFailed": "Copy failed"
+    },
+    "selection": {
+      "selectedCount": "{count, plural, one {# selected} other {# selected}}",
+      "cancel": "Cancel",
+      "delete": "Delete",
+      "deleteTitle": "Delete messages?",
+      "deleteDescription": "{count, plural, one {Delete this message for everyone in the inbox?} other {Delete these # messages for everyone in the inbox?}} Meta cannot remove them from the customer's WhatsApp.",
+      "deleteForEveryone": "Delete for everyone",
+      "toastDeleted": "{count, plural, one {Message deleted} other {# messages deleted}}",
+      "toastFailed": "Failed to delete messages"
+    },
+    "edit": {
+      "title": "Edit message",
+      "description": "Updates this message for everyone in the inbox. Meta cannot change what the customer already sees on WhatsApp.",
+      "cancel": "Cancel",
+      "save": "Save",
+      "empty": "Message text can't be empty",
+      "windowExpired": "Messages can only be edited within 15 minutes of sending",
+      "toastSaved": "Message updated",
+      "toastFailed": "Failed to edit message"
     },
     "replyQuote": {
       "photo": "[Photo]",
@@ -369,7 +394,8 @@
       "location": "[Location]",
       "template": "[Template]",
       "message": "[Message]",
-      "cancelReply": "Cancel reply"
+      "cancelReply": "Cancel reply",
+      "messageDeleted": "This message was deleted"
     },
     "templatePicker": {
       "sendTemplate": "Send template",

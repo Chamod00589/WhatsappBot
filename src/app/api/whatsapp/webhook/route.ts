@@ -13,6 +13,8 @@ import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
 } from '@/lib/whatsapp/template-webhook'
+import { softDeleteMessageByMetaId } from '@/lib/inbox/soft-delete-messages'
+import { applyInboundMessageEdit } from '@/lib/inbox/edit-message'
 
 // The `after()` callback in POST runs within this route's max duration.
 // Inbound processing can fan out to per-media Meta verification calls, so
@@ -73,6 +75,26 @@ interface WhatsAppMessage {
   }
   /** Present when the customer swipe-replies to one of our messages. */
   context?: { id: string }
+  /**
+   * Present when type === 'revoke' (customer deleted a message for
+   * everyone). Only delivered for WhatsApp Business app coexistence;
+   * standard Cloud API numbers typically never see this.
+   */
+  revoke?: { original_message_id?: string }
+  /**
+   * Present when type === 'edit' (customer edited a message within
+   * 15 minutes). Coexistence only — see Meta edit webhook reference.
+   */
+  edit?: {
+    original_message_id?: string
+    message?: {
+      type?: string
+      text?: { body?: string }
+      image?: { caption?: string }
+      video?: { caption?: string }
+      document?: { caption?: string }
+    }
+  }
   /**
    * Click-to-WhatsApp / FB ads context. Present on the first inbound
    * message after a customer taps a CTWA ad. Stored on `messages.referral`
@@ -628,6 +650,45 @@ async function processMessage(
   // Done before parseMessageContent so the media-URL fetch is skipped.
   if (message.type === 'reaction') {
     await handleReaction(message, conversation.id, contactRecord.id)
+    return
+  }
+
+  // Customer "delete for everyone" (revoke). Soft-delete the original
+  // row so the inbox shows a tombstone. Coexistence / Business app only
+  // — standard Cloud API rarely delivers this type.
+  if (message.type === 'revoke') {
+    const originalId = message.revoke?.original_message_id
+    if (originalId) {
+      await softDeleteMessageByMetaId(supabaseAdmin(), {
+        conversationId: conversation.id,
+        metaMessageId: originalId,
+      })
+    } else {
+      console.warn('[webhook] revoke missing original_message_id:', message.id)
+    }
+    return
+  }
+
+  // Customer edited a prior message (15-minute window). Update the
+  // original row's text/caption. Coexistence only.
+  if (message.type === 'edit') {
+    const originalId = message.edit?.original_message_id
+    const edited = message.edit?.message
+    const nextText =
+      edited?.text?.body ??
+      edited?.image?.caption ??
+      edited?.video?.caption ??
+      edited?.document?.caption ??
+      null
+    if (originalId && nextText) {
+      await applyInboundMessageEdit(supabaseAdmin(), {
+        conversationId: conversation.id,
+        metaMessageId: originalId,
+        contentText: nextText,
+      })
+    } else {
+      console.warn('[webhook] edit missing original_message_id or body:', message.id)
+    }
     return
   }
 

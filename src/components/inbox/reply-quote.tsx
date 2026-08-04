@@ -136,6 +136,7 @@ export function buildReplyPreview(
   message: Message,
   t: ReturnType<typeof useTranslations>,
 ): string {
+  if (message.deleted_at) return t("messageDeleted");
   // Prefer caption/text when present; for pure media fall back to a label.
   if (message.content_text?.trim()) return message.content_text;
   switch (message.content_type) {
@@ -165,6 +166,13 @@ export function buildReplyQuoteFields(
   mediaUrl: string | null;
   mediaType: Message["content_type"];
 } {
+  if (message.deleted_at) {
+    return {
+      preview: t("messageDeleted"),
+      mediaUrl: null,
+      mediaType: message.content_type,
+    };
+  }
   return {
     preview: buildReplyPreview(message, t),
     mediaUrl: message.media_url ?? null,

@@ -125,6 +125,11 @@ export const RATE_LIMITS = {
    *  fidget with reactions and a single "swap" is actually two calls
    *  (remove + add) under the hood. */
   react: { limit: 120, windowMs: 60_000 },
+  /** Soft-delete messages (multi-select). 60/min covers bulk deletes
+   *  without letting a runaway loop hammer the DB. */
+  messagesDelete: { limit: 60, windowMs: 60_000 },
+  /** Edit outbound message text/caption. Same budget as delete. */
+  messagesEdit: { limit: 60, windowMs: 60_000 },
   /** Invitation peek (public, per-IP). 30/min lets a forwarded link
    *  retry a handful of times under flaky connectivity without
    *  enabling brute-force token enumeration. With 256-bit tokens the

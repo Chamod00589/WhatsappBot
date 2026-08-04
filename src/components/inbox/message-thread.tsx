@@ -19,10 +19,22 @@ import {
   ArrowLeft,
   PanelRightOpen,
   PanelRightClose,
+  Trash2,
+  X,
+  Loader2,
 } from "lucide-react";
 import { format, isToday, isYesterday, differenceInHours } from "date-fns";
 import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { MessageBubble } from "./message-bubble";
 import { MessageActions } from "./message-actions";
 import {
@@ -41,6 +53,8 @@ import { QuotationDialog } from "./quotation-dialog";
 import { ContactTagChips } from "@/components/inbox/contact-tag-chips";
 import { ConversationThreadControls } from "@/components/inbox/conversation-thread-controls";
 import { resolveCreateOrderSeedText } from "@/lib/orders/detect-address-message";
+import { useCan } from "@/hooks/use-can";
+import { isMessageEditable } from "@/lib/inbox/edit-message";
 import { toast } from "sonner";
 
 interface ReplyDraft {
@@ -155,8 +169,11 @@ export function MessageThread({
   const t = useTranslations("Inbox.messageThread");
   const tTimer = useTranslations("Inbox.sessionTimer");
   const tQuote = useTranslations("Inbox.replyQuote");
+  const tSelect = useTranslations("Inbox.selection");
+  const tEdit = useTranslations("Inbox.edit");
 
   const { user } = useAuth();
+  const canDelete = useCan("send-messages");
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
@@ -170,6 +187,14 @@ export function MessageThread({
   const [latestOrderSelection, setLatestOrderSelection] = useState<string | null>(
     null,
   );
+  /** WhatsApp-style multi-select → soft-delete for everyone in the inbox. */
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [editing, setEditing] = useState(false);
   /** Last highlighted chat text — survives mousedown that clears the live selection. */
   const lastChatSelectionRef = useRef("");
 
@@ -750,6 +775,7 @@ export function MessageThread({
 
   const handleStartReply = useCallback(
     (msg: Message) => {
+      if (msg.deleted_at) return;
       const fields = buildReplyQuoteFields(msg, tQuote);
       setReplyTo({
         id: msg.id,
@@ -761,6 +787,145 @@ export function MessageThread({
     },
     [authorLabelFor, tQuote],
   );
+
+  const clearSelection = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+    setDeleteOpen(false);
+  }, []);
+
+  // Leaving a chat exits selection / edit mode.
+  useEffect(() => {
+    clearSelection();
+    setEditingMessage(null);
+    setEditDraft("");
+  }, [conversationId, clearSelection]);
+
+  const enterSelection = useCallback((messageId: string) => {
+    if (messageId.startsWith("temp-")) return;
+    setSelectionMode(true);
+    setSelectedIds(new Set([messageId]));
+    setReplyTo(null);
+  }, []);
+
+  const toggleSelect = useCallback((messageId: string) => {
+    if (messageId.startsWith("temp-")) return;
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
+  }, []);
+
+  const handleDeleteSelected = useCallback(async () => {
+    if (!conversationId || selectedIds.size === 0) return;
+    setDeleting(true);
+    try {
+      const res = await fetch("/api/messages/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          message_ids: [...selectedIds],
+        }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        deleted_ids?: string[];
+      };
+      if (!res.ok) {
+        toast.error(payload.error || tSelect("toastFailed"));
+        return;
+      }
+      const deletedIds = payload.deleted_ids ?? [...selectedIds];
+      const deletedAt = new Date().toISOString();
+      for (const id of deletedIds) {
+        onUpdateMessage(id, {
+          deleted_at: deletedAt,
+          content_text: undefined,
+          media_url: undefined,
+          template_name: undefined,
+          interactive_payload: undefined,
+          interactive_reply_id: undefined,
+          referral: null,
+          ai_context_summary: null,
+        });
+      }
+      toast.success(
+        tSelect("toastDeleted", { count: deletedIds.length }),
+      );
+      clearSelection();
+    } catch (err) {
+      console.error("[MessageThread] delete failed:", err);
+      toast.error(tSelect("toastFailed"));
+    } finally {
+      setDeleting(false);
+    }
+  }, [
+    clearSelection,
+    conversationId,
+    onUpdateMessage,
+    selectedIds,
+    tSelect,
+  ]);
+
+  const openEdit = useCallback((msg: Message) => {
+    if (!isMessageEditable(msg)) {
+      toast.error(tEdit("windowExpired"));
+      return;
+    }
+    setEditingMessage(msg);
+    setEditDraft(msg.content_text ?? "");
+  }, [tEdit]);
+
+  const handleSaveEdit = useCallback(async () => {
+    if (!conversationId || !editingMessage) return;
+    const next = editDraft.trim();
+    if (!next) {
+      toast.error(tEdit("empty"));
+      return;
+    }
+    setEditing(true);
+    try {
+      const res = await fetch("/api/messages/edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          message_id: editingMessage.id,
+          content_text: next,
+        }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        content_text?: string;
+        edited_at?: string;
+      };
+      if (!res.ok) {
+        toast.error(payload.error || tEdit("toastFailed"));
+        return;
+      }
+      onUpdateMessage(editingMessage.id, {
+        content_text: payload.content_text ?? next,
+        edited_at: payload.edited_at ?? new Date().toISOString(),
+      });
+      toast.success(tEdit("toastSaved"));
+      setEditingMessage(null);
+      setEditDraft("");
+    } catch (err) {
+      console.error("[MessageThread] edit failed:", err);
+      toast.error(tEdit("toastFailed"));
+    } finally {
+      setEditing(false);
+    }
+  }, [
+    conversationId,
+    editDraft,
+    editingMessage,
+    onUpdateMessage,
+    tEdit,
+  ]);
 
   // Single reaction-set primitive. emoji === "" removes; otherwise adds/swaps.
   // The "toggle" semantic (pill click) is computed at the call site where the
@@ -1047,6 +1212,23 @@ export function MessageThread({
                           setOrderSeedText(seed || text);
                           setCreateOrderOpen(true);
                         }}
+                        onSelect={
+                          canDelete && !msg.deleted_at && !msg.id.startsWith("temp-")
+                            ? () => enterSelection(msg.id)
+                            : undefined
+                        }
+                        onEdit={
+                          canDelete && isMessageEditable(msg)
+                            ? () => openEdit(msg)
+                            : undefined
+                        }
+                        selectionMode={selectionMode}
+                        selected={selectedIds.has(msg.id)}
+                        onToggleSelect={
+                          selectionMode && !msg.deleted_at
+                            ? () => toggleSelect(msg.id)
+                            : undefined
+                        }
                       >
                         <MessageBubble
                           message={msg}
@@ -1067,60 +1249,174 @@ export function MessageThread({
 
       {/* AI auto-reply banner — take over an active bot, or resume it
           after a handoff. Renders nothing unless the account has
-          auto-reply configured. */}
-      <AiThreadBanner
-        conversationId={conversation.id}
-        disabled={conversation.ai_autoreply_disabled ?? false}
-        handoffSummary={conversation.ai_handoff_summary}
-        assignedAgentId={assignedAgentId}
-        currentUserId={user?.id}
-        messages={messages}
-        onChange={(patch) => {
-          if ("assigned_agent_id" in patch) {
-            onAssignChange(conversation.id, patch.assigned_agent_id ?? null);
-          }
-          // Resume AI clears Human / Unread tags server-side — refresh chips.
-          if (!patch.ai_autoreply_disabled) {
-            setTagsRefreshKey((n) => n + 1);
-          }
-        }}
-      />
+          auto-reply configured. Hidden during message selection. */}
+      {!selectionMode && (
+        <AiThreadBanner
+          conversationId={conversation.id}
+          disabled={conversation.ai_autoreply_disabled ?? false}
+          handoffSummary={conversation.ai_handoff_summary}
+          assignedAgentId={assignedAgentId}
+          currentUserId={user?.id}
+          messages={messages}
+          onChange={(patch) => {
+            if ("assigned_agent_id" in patch) {
+              onAssignChange(conversation.id, patch.assigned_agent_id ?? null);
+            }
+            // Resume AI clears Human / Unread tags server-side — refresh chips.
+            if (!patch.ai_autoreply_disabled) {
+              setTagsRefreshKey((n) => n + 1);
+            }
+          }}
+        />
+      )}
 
-      <SalesAgentDebugPanel conversationId={conversation.id} />
+      {!selectionMode && (
+        <SalesAgentDebugPanel conversationId={conversation.id} />
+      )}
 
-      {/* Composer */}
-      <MessageComposer
-        conversationId={conversation.id}
-        sessionExpired={sessionInfo.expired}
-        onSend={handleSend}
-        onSendMedia={handleSendMedia}
-        onSendInteractive={handleSendInteractive}
-        onSendProductQuickReply={handleSendProductQuickReply}
-        onOpenTemplates={handleOpenTemplates}
-        onOpenCreateOrder={() => {
-          const live =
-            typeof window !== "undefined"
-              ? window.getSelection()?.toString()?.trim() ?? ""
-              : "";
-          const seed = resolveCreateOrderSeedText({
-            messages,
-            browserSelection: live || lastChatSelectionRef.current,
-          });
-          setOrderSeedText(seed || null);
-          setCreateOrderOpen(true);
+      {/* Selection toolbar (WhatsApp-style) replaces the composer */}
+      {selectionMode ? (
+        <div className="flex shrink-0 items-center gap-2 border-t border-border bg-card px-3 py-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            onClick={clearSelection}
+            aria-label={tSelect("cancel")}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+          <p className="min-w-0 flex-1 text-sm font-medium">
+            {tSelect("selectedCount", { count: selectedIds.size })}
+          </p>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            disabled={selectedIds.size === 0 || deleting}
+            onClick={() => setDeleteOpen(true)}
+          >
+            <Trash2 className="h-4 w-4" />
+            {tSelect("delete")}
+          </Button>
+        </div>
+      ) : (
+        <MessageComposer
+          conversationId={conversation.id}
+          sessionExpired={sessionInfo.expired}
+          onSend={handleSend}
+          onSendMedia={handleSendMedia}
+          onSendInteractive={handleSendInteractive}
+          onSendProductQuickReply={handleSendProductQuickReply}
+          onOpenTemplates={handleOpenTemplates}
+          onOpenCreateOrder={() => {
+            const live =
+              typeof window !== "undefined"
+                ? window.getSelection()?.toString()?.trim() ?? ""
+                : "";
+            const seed = resolveCreateOrderSeedText({
+              messages,
+              browserSelection: live || lastChatSelectionRef.current,
+            });
+            setOrderSeedText(seed || null);
+            setCreateOrderOpen(true);
+          }}
+          onOpenLatestOrder={() => {
+            const live =
+              typeof window !== "undefined"
+                ? window.getSelection()?.toString()?.trim() ?? ""
+                : "";
+            setLatestOrderSelection(live || lastChatSelectionRef.current || null);
+            setLatestOrderOpen(true);
+          }}
+          onOpenQuotation={() => setQuotationOpen(true)}
+          replyTo={replyTo}
+          onClearReply={() => setReplyTo(null)}
+        />
+      )}
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{tSelect("deleteTitle")}</DialogTitle>
+            <DialogDescription>
+              {tSelect("deleteDescription", { count: selectedIds.size })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteOpen(false)}
+              disabled={deleting}
+            >
+              {tSelect("cancel")}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void handleDeleteSelected()}
+              disabled={deleting || selectedIds.size === 0}
+            >
+              {deleting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              {tSelect("deleteForEveryone")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!editingMessage}
+        onOpenChange={(open) => {
+          if (!open && !editing) {
+            setEditingMessage(null);
+            setEditDraft("");
+          }
         }}
-        onOpenLatestOrder={() => {
-          const live =
-            typeof window !== "undefined"
-              ? window.getSelection()?.toString()?.trim() ?? ""
-              : "";
-          setLatestOrderSelection(live || lastChatSelectionRef.current || null);
-          setLatestOrderOpen(true);
-        }}
-        onOpenQuotation={() => setQuotationOpen(true)}
-        replyTo={replyTo}
-        onClearReply={() => setReplyTo(null)}
-      />
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{tEdit("title")}</DialogTitle>
+            <DialogDescription>{tEdit("description")}</DialogDescription>
+          </DialogHeader>
+          <textarea
+            value={editDraft}
+            onChange={(e) => setEditDraft(e.target.value)}
+            rows={5}
+            maxLength={4096}
+            disabled={editing}
+            className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label={tEdit("title")}
+          />
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setEditingMessage(null);
+                setEditDraft("");
+              }}
+              disabled={editing}
+            >
+              {tEdit("cancel")}
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleSaveEdit()}
+              disabled={editing || !editDraft.trim()}
+            >
+              {editing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              {tEdit("save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <TemplatePicker
         open={templateModalOpen}

@@ -21,6 +21,7 @@ import { runSalesAgentToolLoop } from './tool-loop'
 import { loadAgentCatalogs } from './tool-executors'
 import { extractCartIntent } from './cart-intent-extract'
 import { runCartPipeline } from './cart-pipeline'
+import { maybeSendProductDetailsQr } from './product-details-qr'
 import { SalesAgentRunLogger } from './debug-log'
 import { rememberAnsweredQuestion } from './dedupe'
 import type { AiUsage } from '@/lib/ai/types'
@@ -451,12 +452,49 @@ export async function dispatchSalesAgentNow(
       }
     }
 
+    // Product colors/details ask → send that bag's Details QR (not custom FAQ).
+    // Prefer pending/quoted "me bag". Once per chat unless they ask again (this ask counts).
+    let productDetailsHandled = false
+    if (config.productMatch && burstText.trim()) {
+      try {
+        const details = await maybeSendProductDetailsQr({
+          db,
+          accountId,
+          conversationId,
+          burstText,
+          orderPending: orderPendingForExtra,
+          productCatalog: products,
+          forceResend: true,
+        })
+        if (details.sent) {
+          productDetailsHandled = true
+          log.step('product_details_qr', details.note, {
+            productName: details.productName,
+          })
+          systemExtra = [
+            systemExtra,
+            `Product Details QR already sent this turn for ${details.productName || 'bag'} (colors/details ask). Do NOT call answer_policy for product colors.`,
+          ]
+            .filter(Boolean)
+            .join('\n\n')
+        } else if (details.note && !details.note.startsWith('not a')) {
+          log.step('product_details_qr', details.note)
+        }
+      } catch (err) {
+        console.warn('[sales-agent] product details QR failed:', err)
+        log.step(
+          'product_details_qr',
+          `failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
     // If cart clarified/quoted and there is no image / no other work needed,
     // still allow tool loop for address/FAQ/identify — but skip when image-less
     // and cart already replied unless the burst looks like an address.
     const likelyAddress = isAddressLikeMessage(burstText)
     const skipToolLoop =
-      cartHandled &&
+      (cartHandled || productDetailsHandled) &&
       inboundImages.length === 0 &&
       !likelyAddress &&
       !adBlurb
@@ -464,7 +502,9 @@ export async function dispatchSalesAgentNow(
     if (skipToolLoop) {
       log.step(
         'ai_tools',
-        'Skipped tool loop — cart pipeline already replied (no images/address)',
+        productDetailsHandled
+          ? 'Skipped tool loop — product Details QR sent for colors/details ask'
+          : 'Skipped tool loop — cart pipeline already replied (no images/address)',
       )
       if (extractUsage) {
         void logAiUsage(db, {
@@ -518,7 +558,7 @@ export async function dispatchSalesAgentNow(
 
     log.set({
       reply: {
-        replied: result.replied || cartHandled,
+        replied: result.replied || cartHandled || productDetailsHandled,
         handoff: result.handoff,
         text: result.replyText?.slice(0, 500),
       },
@@ -528,13 +568,14 @@ export async function dispatchSalesAgentNow(
       'ai_result',
       result.handoff
         ? 'Model requested handoff / could not complete'
-        : result.replied || cartHandled
+        : result.replied || cartHandled || productDetailsHandled
           ? 'Agent handled the turn'
           : 'Agent produced no reply',
       {
-        replied: result.replied || cartHandled,
+        replied: result.replied || cartHandled || productDetailsHandled,
         handoff: result.handoff,
         cartHandled,
+        productDetailsHandled,
         usage,
       },
     )
@@ -548,7 +589,7 @@ export async function dispatchSalesAgentNow(
       usage,
     })
 
-    if (result.handoff || (!result.replied && !cartHandled)) {
+    if (result.handoff || (!result.replied && !cartHandled && !productDetailsHandled)) {
       const summary = buildHandoffSummary({
         messages: loopMessages,
         replyCount: gate.conversation.ai_reply_count ?? 0,
@@ -592,7 +633,7 @@ export async function dispatchSalesAgentNow(
       return
     }
 
-    if (result.replied || cartHandled) {
+    if (result.replied || cartHandled || productDetailsHandled) {
       if (inboundText) {
         await rememberAnsweredQuestion(db, conversationId, inboundText)
       }

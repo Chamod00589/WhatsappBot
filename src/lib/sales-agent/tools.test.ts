@@ -21,10 +21,10 @@ function fakeConfig(
 }
 
 describe('buildSalesAgentTools (FAQ/identify layer)', () => {
-  it('exposes identify/FAQ/order tools but not cart ownership tools', () => {
+  it('exposes identify/FAQ/order tools and find_product for product Details QR', () => {
     const names = buildSalesAgentTools(fakeConfig()).map((t) => t.function.name)
     expect(names).toContain('identify_product')
-    expect(names).not.toContain('find_product')
+    expect(names).toContain('find_product')
     expect(names).not.toContain('generate_quote')
     expect(names).not.toContain('update_order')
     expect(names).toContain('create_order')

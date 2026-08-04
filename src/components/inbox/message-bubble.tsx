@@ -15,6 +15,7 @@ import {
   CornerDownLeft,
   Sparkles,
   ExternalLink,
+  Ban,
 } from "lucide-react";
 import { format } from "date-fns";
 import { ReplyQuote } from "./reply-quote";
@@ -401,8 +402,11 @@ export function MessageBubble({
 
   const isAgent = message.sender_type === "agent" || message.sender_type === "bot";
   const time = format(new Date(message.created_at), "HH:mm");
+  const isDeleted = !!message.deleted_at;
   const referral =
-    message.referral && Object.keys(message.referral).length > 0
+    !isDeleted &&
+    message.referral &&
+    Object.keys(message.referral).length > 0
       ? message.referral
       : null;
 
@@ -421,19 +425,36 @@ export function MessageBubble({
           isAgent
             ? "rounded-br-md bg-primary text-primary-foreground"
             : "rounded-bl-md bg-muted text-foreground",
+          isDeleted && "opacity-80",
         )}
       >
-        {reply && (
-          <ReplyQuote
-            authorLabel={reply.authorLabel}
-            preview={reply.preview}
-            mediaUrl={reply.mediaUrl}
-            mediaType={reply.mediaType}
-            onPrimary={isAgent}
-          />
+        {isDeleted ? (
+          <div
+            className={cn(
+              "flex items-center gap-1.5 text-sm italic",
+              isAgent
+                ? "text-primary-foreground/80"
+                : "text-muted-foreground",
+            )}
+          >
+            <Ban className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            <span>{t("messageDeleted")}</span>
+          </div>
+        ) : (
+          <>
+            {reply && (
+              <ReplyQuote
+                authorLabel={reply.authorLabel}
+                preview={reply.preview}
+                mediaUrl={reply.mediaUrl}
+                mediaType={reply.mediaType}
+                onPrimary={isAgent}
+              />
+            )}
+            {referral && <AdReferralCard referral={referral} t={t} />}
+            <MessageContent message={message} t={t} />
+          </>
         )}
-        {referral && <AdReferralCard referral={referral} t={t} />}
-        <MessageContent message={message} t={t} />
         <div
           className={cn(
             "mt-1 flex items-center gap-1",
@@ -444,13 +465,26 @@ export function MessageBubble({
               (always outbound, so it sits on the primary fill). Lets
               agents tell an AI reply from their own / a Flow's at a
               glance. */}
-          {message.ai_generated && (
+          {!isDeleted && message.ai_generated && (
             <span
               className="inline-flex items-center gap-0.5 rounded-full bg-primary-foreground/20 px-1.5 py-px text-[9px] font-semibold uppercase leading-none tracking-wide text-primary-foreground"
               title={t("aiBadgeTitle")}
             >
               <Sparkles className="h-2.5 w-2.5" />
               {t("aiBadge")}
+            </span>
+          )}
+          {!isDeleted && message.edited_at && (
+            <span
+              className={cn(
+                "text-[10px] italic",
+                isAgent
+                  ? "text-primary-foreground/70"
+                  : "text-muted-foreground",
+              )}
+              title={t("editedTitle")}
+            >
+              {t("edited")}
             </span>
           )}
           <span
@@ -465,10 +499,10 @@ export function MessageBubble({
           >
             {time}
           </span>
-          {isAgent && <StatusIcon status={message.status} />}
+          {!isDeleted && isAgent && <StatusIcon status={message.status} />}
         </div>
       </div>
-      {reactions && reactions.length > 0 && onToggleReaction && (
+      {!isDeleted && reactions && reactions.length > 0 && onToggleReaction && (
         <MessageReactions
           reactions={reactions}
           currentUserId={currentUserId}

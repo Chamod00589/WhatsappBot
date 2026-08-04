@@ -35,6 +35,7 @@ export async function buildSalesAgentContext(
       'sender_type, content_text, content_type, ai_context_summary, referral, created_at',
     )
     .eq('conversation_id', conversationId)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false })
     .limit(Math.max(limit * 3, 40))
 

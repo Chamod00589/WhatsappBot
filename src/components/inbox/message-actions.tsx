@@ -1,7 +1,14 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import { CornerUpLeft, Copy, ReceiptText, SmilePlus } from "lucide-react";
+import {
+  CornerUpLeft,
+  Copy,
+  ReceiptText,
+  SmilePlus,
+  CheckSquare,
+  Pencil,
+} from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
@@ -22,6 +29,14 @@ interface MessageActionsProps {
   onReact: (emoji: string) => void;
   /** Seed Create Order with this message’s text (inbound address messages). */
   onUseForOrder?: (text: string) => void;
+  /** Enter multi-select with this message selected (WhatsApp-style). */
+  onSelect?: () => void;
+  /** Edit outbound text/caption (inbox-side; Meta cannot sync to phone). */
+  onEdit?: () => void;
+  /** When true, hide the hover toolbar (selection mode owns the row). */
+  selectionMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
   children: ReactNode;
 }
 
@@ -35,6 +50,11 @@ export function MessageActions({
   onReply,
   onReact,
   onUseForOrder,
+  onSelect,
+  onEdit,
+  selectionMode = false,
+  selected = false,
+  onToggleSelect,
   children,
 }: MessageActionsProps) {
   const t = useTranslations("Inbox.actions");
@@ -47,13 +67,24 @@ export function MessageActions({
 
   const isAgent =
     message.sender_type === "agent" || message.sender_type === "bot";
+  const isDeleted = !!message.deleted_at;
   const canUseForOrder =
     !!onUseForOrder &&
     !isAgent &&
+    !isDeleted &&
     !!(message.content_text && message.content_text.trim());
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    // Long-press / right-click enters selection (WhatsApp-like) when wired.
+    if (onSelect && !selectionMode && !isDeleted) {
+      onSelect();
+      return;
+    }
+    if (selectionMode && onToggleSelect) {
+      onToggleSelect();
+      return;
+    }
     setTouchOpen(true);
   };
 
@@ -93,18 +124,52 @@ export function MessageActions({
     setTouchOpen(false);
   };
 
+  const handleSelect = () => {
+    onSelect?.();
+    setTouchOpen(false);
+  };
+
+  const handleEdit = () => {
+    onEdit?.();
+    setTouchOpen(false);
+  };
+
   // Row alignment lives here (not in MessageBubble) so the `group/actions`
   // hover region matches the bubble's content width — hovering empty space
   // in the row no longer reveals the toolbar.
   return (
     <div
       className={cn(
-        "flex w-full",
+        "flex w-full items-center gap-2",
         isAgent ? "justify-end" : "justify-start",
+        selectionMode && "cursor-pointer",
+        selectionMode && selected && "rounded-lg bg-primary/10",
       )}
       onContextMenu={handleContextMenu}
       onBlur={() => setTouchOpen(false)}
+      onClick={
+        selectionMode && onToggleSelect
+          ? (e) => {
+              e.preventDefault();
+              onToggleSelect();
+            }
+          : undefined
+      }
     >
+      {selectionMode && !isDeleted && (
+        <div
+          className={cn(
+            "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-bold transition-colors",
+            selected
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-muted-foreground/40 bg-background text-transparent",
+            isAgent && "order-last",
+          )}
+          aria-hidden
+        >
+          {selected ? "✓" : ""}
+        </div>
+      )}
       {/* `min-w-0` lets this flex child actually respect the 75% cap.
        *  Default `min-width: auto` lets content (a long quote preview,
        *  an unbroken URL) push past the cap and shove the row past
@@ -112,67 +177,91 @@ export function MessageActions({
        *  area. See issue #165. */}
       <div className="group/actions relative min-w-0 max-w-[75%]">
         {children}
-      <div
-        data-touch-open={touchOpen || pickerOpen ? "true" : undefined}
-        className={cn(
-          "absolute -top-3 z-10 flex h-7 items-center gap-0.5 rounded-full border border-border bg-popover/95 px-1 shadow-md backdrop-blur-sm transition-opacity",
-          "opacity-0 group-hover/actions:opacity-100 group-focus-within/actions:opacity-100",
-          "data-[touch-open=true]:opacity-100",
-          isAgent ? "right-3" : "left-3",
-        )}
-      >
-        <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
-          <PopoverTrigger
-            className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
-            aria-label={t("react")}
+        {!selectionMode && !isDeleted && (
+          <div
+            data-touch-open={touchOpen || pickerOpen ? "true" : undefined}
+            className={cn(
+              "absolute -top-3 z-10 flex h-7 items-center gap-0.5 rounded-full border border-border bg-popover/95 px-1 shadow-md backdrop-blur-sm transition-opacity",
+              "opacity-0 group-hover/actions:opacity-100 group-focus-within/actions:opacity-100",
+              "data-[touch-open=true]:opacity-100",
+              isAgent ? "right-3" : "left-3",
+            )}
           >
-            <SmilePlus className="h-3.5 w-3.5" />
-          </PopoverTrigger>
-          <PopoverContent
-            className="flex w-auto flex-row gap-1 p-1.5"
-            sideOffset={6}
-          >
-            {QUICK_EMOJIS.map((e) => (
-              <button
-                key={e}
-                type="button"
-                onClick={() => handlePickEmoji(e)}
-                className="flex h-8 w-8 items-center justify-center rounded-full text-lg leading-none transition-transform hover:scale-125 hover:bg-muted"
-                aria-label={t("reactWith", { emoji: e })}
+            <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+              <PopoverTrigger
+                className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("react")}
               >
-                {e}
+                <SmilePlus className="h-3.5 w-3.5" />
+              </PopoverTrigger>
+              <PopoverContent
+                className="flex w-auto flex-row gap-1 p-1.5"
+                sideOffset={6}
+              >
+                {QUICK_EMOJIS.map((e) => (
+                  <button
+                    key={e}
+                    type="button"
+                    onClick={() => handlePickEmoji(e)}
+                    className="flex h-8 w-8 items-center justify-center rounded-full text-lg leading-none transition-transform hover:scale-125 hover:bg-muted"
+                    aria-label={t("reactWith", { emoji: e })}
+                  >
+                    {e}
+                  </button>
+                ))}
+              </PopoverContent>
+            </Popover>
+            <button
+              type="button"
+              onClick={handleReply}
+              className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
+              aria-label={t("reply")}
+            >
+              <CornerUpLeft className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
+              aria-label={t("copyText")}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </button>
+            {onEdit ? (
+              <button
+                type="button"
+                onClick={handleEdit}
+                className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("edit")}
+                title={t("edit")}
+              >
+                <Pencil className="h-3.5 w-3.5" />
               </button>
-            ))}
-          </PopoverContent>
-        </Popover>
-        <button
-          type="button"
-          onClick={handleReply}
-          className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
-          aria-label={t("reply")}
-        >
-          <CornerUpLeft className="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={handleCopy}
-          className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
-          aria-label={t("copyText")}
-        >
-          <Copy className="h-3.5 w-3.5" />
-        </button>
-        {canUseForOrder ? (
-          <button
-            type="button"
-            onClick={handleUseForOrder}
-            className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
-            aria-label={t("useForOrder")}
-            title={t("useForOrder")}
-          >
-            <ReceiptText className="h-3.5 w-3.5" />
-          </button>
-        ) : null}
-      </div>
+            ) : null}
+            {onSelect ? (
+              <button
+                type="button"
+                onClick={handleSelect}
+                className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("select")}
+                title={t("select")}
+              >
+                <CheckSquare className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+            {canUseForOrder ? (
+              <button
+                type="button"
+                onClick={handleUseForOrder}
+                className="flex h-5 w-5 items-center justify-center rounded-full text-popover-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("useForOrder")}
+                title={t("useForOrder")}
+              >
+                <ReceiptText className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
   );
