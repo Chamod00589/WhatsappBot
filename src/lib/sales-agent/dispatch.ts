@@ -636,6 +636,8 @@ export async function dispatchSalesAgentNow(
               updated: pipe.updated,
               clarifyReason: pipe.clarifyReason,
               verify: pipe.verify || null,
+              oldCart: pipe.verify?.oldItems || null,
+              newCart: pipe.verify?.newItems || null,
             },
           )
           if (pipe.handled) {

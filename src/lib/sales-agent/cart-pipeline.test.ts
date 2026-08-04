@@ -10,6 +10,7 @@ import {
   combineConfidence,
   heuristicLinesFromText,
   looksLikeAbsoluteQtyDesire,
+  looksLikeColorRemoveRequest,
   mergePhotoPendingIntoResolved,
   parseColorSwapRequest,
   resolveExtractionItems,
@@ -405,6 +406,63 @@ describe('cart ops + completeness', () => {
         ],
       }),
     ).toBe('add')
+  })
+
+  it('remove drops white by color even when extract named wrong bag', () => {
+    const existing = [
+      {
+        productId: 'mini-1',
+        name: 'Mini Shoulder Bag',
+        color: 'Black',
+        qty: 2,
+        price: 990,
+      },
+      {
+        productId: 'mini-1',
+        name: 'Mini Shoulder Bag',
+        color: 'White',
+        qty: 1,
+        price: 990,
+      },
+      {
+        productId: 'cloudy-1',
+        name: 'Cloudy Shoulder Bag',
+        color: 'Black',
+        qty: 3,
+        price: 2500,
+      },
+    ]
+    const next = applyCartOperationToPending(
+      existing,
+      [
+        {
+          productId: 'cloudy-1',
+          name: 'Cloudy Shoulder Bag',
+          color: 'White',
+          qty: 1,
+          confidence: 0.95,
+        },
+      ],
+      'remove',
+      { color: 'White' },
+    )
+    expect(next).toHaveLength(2)
+    expect(next.every((l) => l.color.toLowerCase() !== 'white')).toBe(true)
+    expect(next.find((l) => l.color === 'Black' && l.productId === 'mini-1')?.qty).toBe(
+      2,
+    )
+  })
+
+  it('looksLikeColorRemoveRequest detects sudu/white epa', () => {
+    expect(
+      looksLikeColorRemoveRequest(
+        'Mata meke sudu pata eka epa. Anith tikata price eka ewanna',
+      ),
+    ).toBe(true)
+    expect(looksLikeColorRemoveRequest('White color eka ain karanna')).toBe(
+      true,
+    )
+    expect(looksLikeColorRemoveRequest('Cloudy black 2k oni')).toBe(false)
   })
 
   it('does not double qty when thawa quotation matches identify pending', () => {

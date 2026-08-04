@@ -184,8 +184,18 @@ export type CartPipelineResult = {
     ok: boolean
     source: string
     reason?: string
-    oldItems?: Array<{ name: string; color?: string; qty: number }>
-    newItems?: Array<{ name: string; color?: string; qty: number }>
+    oldItems?: Array<{
+      name: string
+      color?: string
+      qty: number
+      productId?: string
+    }>
+    newItems?: Array<{
+      name: string
+      color?: string
+      qty: number
+      productId?: string
+    }>
   }
 }
 
@@ -378,15 +388,42 @@ export function applyCartOperationToPending(
           ]
 
     let copy = existing.map((e) => ({ ...e }))
+
+    // Color / line remove — never fall back to deleting an unrelated last bag.
+    if (op === 'remove') {
+      let anyRemoved = false
+      for (const line of lines) {
+        let targetIdx = findTargetIndex(copy, target, [line], {
+          forRemove: true,
+        })
+        while (targetIdx >= 0) {
+          copy.splice(targetIdx, 1)
+          anyRemoved = true
+          targetIdx = findTargetIndex(copy, target, [line], { forRemove: true })
+        }
+      }
+      if (!anyRemoved) {
+        const removeColors = new Set(
+          [
+            canonicalizeExtractedColor(target?.color),
+            ...lines.map((l) => canonicalizeExtractedColor(l.color)),
+          ].filter((c): c is string => Boolean(c)),
+        )
+        if (removeColors.size) {
+          copy = existing.filter(
+            (e) =>
+              !removeColors.has(canonicalizeExtractedColor(e.color) || ''),
+          )
+        }
+      }
+      return copy
+    }
+
     for (const line of lines) {
       let targetIdx = findTargetIndex(copy, target, [line])
       if (targetIdx < 0 && copy.length === 1) targetIdx = 0
       if (targetIdx < 0) continue
 
-      if (op === 'remove') {
-        copy.splice(targetIdx, 1)
-        continue
-      }
       const delta = Math.max(1, Number(line.qty) || 1)
       if (op === 'add_qty') {
         copy[targetIdx] = {
@@ -529,6 +566,7 @@ function findTargetIndex(
   existing: OrderPendingQuotedItem[],
   target?: { productId?: string | null; color?: string | null },
   incoming?: ResolvedCartLine[],
+  opts?: { forRemove?: boolean },
 ): number {
   const pid = target?.productId || incoming?.[0]?.productId
   const color = canonicalizeExtractedColor(
@@ -542,7 +580,27 @@ function findTargetIndex(
     })
     if (byId >= 0) return byId
   }
+  // Color-only remove ("white eka epa" / "sudu pata") — match any bag of that color
+  if (opts?.forRemove && color) {
+    const byColor = existing.findIndex(
+      (e) => normalizeMatchText(e.color) === normalizeMatchText(color),
+    )
+    if (byColor >= 0) return byColor
+  }
+  // Never fall back to "last line" on remove — that deletes the wrong bag.
+  if (opts?.forRemove) return -1
   return existing.length ? existing.length - 1 : -1
+}
+
+/** Customer wants a color removed ("white eka epa", "sudu pata ain"). */
+export function looksLikeColorRemoveRequest(text: string): boolean {
+  const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (!t) return false
+  const hasRemove =
+    /\b(epa|ain|nathiwa|nathuwa|remove|without|drop)\b/.test(t) ||
+    /\bain\s+karanna\b/.test(t)
+  if (!hasRemove) return false
+  return extractColorsFromText(t).length > 0
 }
 
 export function mergePendingQuotedAdd(
@@ -1308,22 +1366,31 @@ export async function runCartPipeline(args: {
 
   // Photo bags saved by early identify must not be wiped when extract only
   // returns the named bag ("this bag and puff Pink 2" → keep Mini + Puff).
+  // Keep photo bags when extract only returned the named bag — but never on
+  // remove (would turn "remove white" into remove Mini+White targets).
   if (
     existingPending.length &&
     resolved.length &&
+    extraction.operation !== 'remove' &&
     (extraction.intent === 'quotation' || extraction.intent === 'edit_cart')
   ) {
     resolved = mergePhotoPendingIntoResolved(existingPending, resolved)
   }
 
-  const operation: CartOperation = coerceCartOperation({
+  let operation: CartOperation = coerceCartOperation({
     burstText,
     operation: extraction.operation,
     intent: extraction.intent,
     existing: existingPending,
     incoming: resolved,
   })
-
+  // "sudu/white … epa/ain" must stay remove even if LLM said add/set
+  if (
+    looksLikeColorRemoveRequest(burstText) &&
+    (operation === 'add' || operation === 'set' || !operation)
+  ) {
+    operation = 'remove'
+  }
   // Resolve target productId from extraction.target
   let targetPid: string | null = null
   if (extraction.target.mentioned) {
@@ -1352,6 +1419,37 @@ export async function runCartPipeline(args: {
     nextPending.length > 0
       ? pendingToResolved(nextPending)
       : resolved
+
+  // Remove left nothing — don't invent a new quote / don't double-add
+  if (operation === 'remove' && !workingLines.length) {
+    const text = useSinglish
+      ? 'White/color eka ain kala — cart eka empty una. Thawa bags thiyenawada?'
+      : 'That color was removed and the cart is empty. Any bags left to quote?'
+    await sendClarify(args, text)
+    await db
+      .from('conversations')
+      .update({ sa_order_pending: null })
+      .eq('id', conversationId)
+    return {
+      handled: true,
+      quoted: false,
+      clarified: true,
+      updated: true,
+      message: text,
+      clarifyReason: 'incomplete',
+      verify: {
+        ok: true,
+        source: 'skipped',
+        oldItems: oldCartSnapshot.map((i) => ({
+          name: i.name,
+          color: i.color || undefined,
+          qty: i.qty,
+          productId: i.productId || undefined,
+        })),
+        newItems: [],
+      },
+    }
+  }
 
   // Completeness gate — never partial quote
   const complete = checkQuoteCompleteness(workingLines, productCatalog)
@@ -1431,12 +1529,29 @@ export async function runCartPipeline(args: {
       )
       .sort()
       .join(';')
-  const isEditSend =
+
+  // Always attach old/new for debug (even when verify is skipped)
+  let verifyMeta: CartPipelineResult['verify'] = {
+    ok: true,
+    source: 'skipped',
+    oldItems: oldCartSnapshot.map((i) => ({
+      name: i.name,
+      color: i.color || undefined,
+      qty: i.qty,
+      productId: i.productId || undefined,
+    })),
+    newItems: newSnap.map((i) => ({
+      name: i.name,
+      color: i.color || undefined,
+      qty: i.qty,
+      productId: i.productId || undefined,
+    })),
+  }
+
+  const shouldVerify =
     oldCartSnapshot.length > 0 &&
-    operation !== 'remove' &&
     cartSig(oldCartSnapshot) !== cartSig(newSnap)
-  let verifyMeta: CartPipelineResult['verify']
-  if (isEditSend) {
+  if (shouldVerify) {
     const verify = await verifyCartChange({
       oldItems: oldCartSnapshot,
       newItems: newSnap,
@@ -1451,16 +1566,8 @@ export async function runCartPipeline(args: {
       ok: verify.ok,
       source: verify.source,
       reason: verify.ok ? undefined : verify.reason,
-      oldItems: oldCartSnapshot.map((i) => ({
-        name: i.name,
-        color: i.color || undefined,
-        qty: i.qty,
-      })),
-      newItems: newSnap.map((i) => ({
-        name: i.name,
-        color: i.color || undefined,
-        qty: i.qty,
-      })),
+      oldItems: verifyMeta.oldItems,
+      newItems: verifyMeta.newItems,
     }
     if (!verify.ok) {
       await sendClarify(args, verify.message)
@@ -1677,12 +1784,10 @@ export async function runCartPipeline(args: {
     }
   }
 
-  // Prefer update pending quotation when editing existing quote
+  // Prefer update pending quotation when editing existing quote.
+  // `priced` is already the FULL cart after applyCartOperationToPending —
+  // always replace (never add/merge) or remove ops double Mini qty.
   if (extraction.intent === 'edit_cart' && existingPending.length) {
-    const mode =
-      operation === 'set' || operation === 'replace_qty'
-        ? ('replace' as const)
-        : ('add' as const)
     const r = await actionUpdatePendingQuotation({
       db,
       accountId: args.accountId,
@@ -1691,7 +1796,7 @@ export async function runCartPipeline(args: {
       configOwnerUserId: args.configOwnerUserId,
       items: priced,
       useSinglish,
-      mode,
+      mode: 'replace',
     })
     return {
       handled: r.ok,
@@ -1699,7 +1804,7 @@ export async function runCartPipeline(args: {
       clarified: false,
       updated: r.ok,
       message: r.ok
-        ? `${r.message}${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
+        ? `Updated quotation (replace${operation ? `/${operation}` : ''}): ${r.message}${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
         : r.message,
       lines: workingLines,
       verify: verifyMeta,

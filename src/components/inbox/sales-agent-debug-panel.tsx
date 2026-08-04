@@ -350,6 +350,44 @@ export function SalesAgentDebugPanel({
                           </Section>
                         ) : null}
 
+                        {(() => {
+                          const cartStep = [...(run.payload.steps ?? [])]
+                            .reverse()
+                            .find((s) => s.phase === 'cart_pipeline')
+                          const d = (cartStep?.data || {}) as {
+                            oldCart?: unknown
+                            newCart?: unknown
+                            verify?: { oldItems?: unknown; newItems?: unknown }
+                          }
+                          const oldCart = d.oldCart ?? d.verify?.oldItems
+                          const newCart = d.newCart ?? d.verify?.newItems
+                          if (oldCart == null && newCart == null) return null
+                          return (
+                            <Section
+                              title="Cart change (old → new)"
+                              copyAllText={[
+                                '=== Old cart ===',
+                                safeJson(oldCart ?? []),
+                                '',
+                                '=== New cart ===',
+                                safeJson(newCart ?? []),
+                              ].join('\n')}
+                              copyAllLabel="Copy old/new cart"
+                            >
+                              <div className="grid gap-2 sm:grid-cols-2">
+                                <CopyableBlock
+                                  label="Old cart"
+                                  text={safeJson(oldCart ?? [])}
+                                />
+                                <CopyableBlock
+                                  label="New cart"
+                                  text={safeJson(newCart ?? [])}
+                                />
+                              </div>
+                            </Section>
+                          )
+                        })()}
+
                         {run.payload.reply ? (
                           <Section
                             title="Reply / outcome"
@@ -682,6 +720,36 @@ function formatCompleteRun(run: RunRow): string {
   }
   if (p.identify != null) {
     parts.push('', '=== Identify ===', safeJson(p.identify))
+  }
+  const cartStep = [...(p.steps ?? [])]
+    .reverse()
+    .find((s) => s.phase === 'cart_pipeline')
+  const cartData = (cartStep?.data || {}) as {
+    oldCart?: unknown
+    newCart?: unknown
+    verify?: { oldItems?: unknown; newItems?: unknown; ok?: boolean; source?: string }
+  }
+  const oldCart = cartData.oldCart ?? cartData.verify?.oldItems
+  const newCart = cartData.newCart ?? cartData.verify?.newItems
+  if (oldCart != null || newCart != null) {
+    parts.push(
+      '',
+      '=== Old cart ===',
+      safeJson(oldCart ?? []),
+      '',
+      '=== New cart ===',
+      safeJson(newCart ?? []),
+    )
+    if (cartData.verify) {
+      parts.push(
+        '',
+        '=== Verify ===',
+        safeJson({
+          ok: cartData.verify.ok,
+          source: cartData.verify.source,
+        }),
+      )
+    }
   }
   if (p.product_hits?.length) {
     parts.push(
