@@ -260,13 +260,13 @@ export function extractExplicitQty(text: string): number | null {
   const t = text.toLowerCase()
   if (!t.trim()) return null
 
-  // "3k ganna oni", "bag 2k", "5k bags" — Singlish piece count (k = කීපයක්)
-  const kMatch = t.match(/\b(\d{1,2})\s*k\b/)
+  // "3k ganna oni", "bag 2k", "5k bags", "1kui" typo — Singlish piece count
+  const kMatch = t.match(/\b(\d{1,2})\s*k(?:ui|u)?\b/)
   if (kMatch) {
     const n = Number(kMatch[1])
     if (n >= 1 && n <= 20) {
       const qtyCue =
-        /\b(ganna|ganne|oni|onne|bags?|pcs?|pieces?|qty|quantity|venum|vaenum)\b/.test(
+        /\b(ganna|ganne|oni|onne|bags?|pcs?|pieces?|qty|quantity|venum|vaenum|denna)\b/.test(
           t,
         ) ||
         /\b(price|prices|kohomada|kohanada|kochchara|kochcara|kiyanna|evlo)\b/.test(
@@ -315,27 +315,37 @@ export function extractExplicitQty(text: string): number | null {
 export function extractAllQtys(text: string): number[] {
   const t = text.toLowerCase()
   if (!t.trim()) return []
-  const out: number[] = []
+  const positioned: Array<{ idx: number; n: number }> = []
 
-  for (const m of t.matchAll(/\b(\d{1,2})\s*k\b/g)) {
+  for (const m of t.matchAll(/\b(\d{1,2})\s*k(?:ui|u)?\b/g)) {
     const n = Number(m[1])
-    if (n >= 1 && n <= 20) out.push(n)
+    if (n >= 1 && n <= 20) {
+      positioned.push({ idx: m.index ?? 0, n })
+    }
   }
   for (const m of t.matchAll(/\b(\d{1,2})\s*i\b/g)) {
     const n = Number(m[1])
-    if (n >= 1 && n <= 20) out.push(n)
+    if (n >= 1 && n <= 20) {
+      positioned.push({ idx: m.index ?? 0, n })
+    }
   }
-  if (out.length) return out
+  if (positioned.length) {
+    return positioned.sort((a, b) => a.idx - b.idx).map((p) => p.n)
+  }
 
   for (const m of t.matchAll(
     /\b(?:qty|quantity|x)\s*[:=]?\s*(\d{1,2})\b/g,
   )) {
     const n = Number(m[1])
-    if (n >= 1 && n <= 50) out.push(n)
+    if (n >= 1 && n <= 50) {
+      positioned.push({ idx: m.index ?? 0, n })
+    }
   }
   for (const m of t.matchAll(/\b(\d{1,2})\s*(?:bags?|pcs?|pieces?)\b/g)) {
     const n = Number(m[1])
-    if (n >= 1 && n <= 50) out.push(n)
+    if (n >= 1 && n <= 50) {
+      positioned.push({ idx: m.index ?? 0, n })
+    }
   }
 
   const wordMap: Array<[RegExp, number]> = [
@@ -345,11 +355,12 @@ export function extractAllQtys(text: string): number[] {
     [/\bpahak\b/g, 5],
   ]
   for (const [re, n] of wordMap) {
-    const matches = t.match(re)
-    if (matches) for (let i = 0; i < matches.length; i++) out.push(n)
+    for (const m of t.matchAll(re)) {
+      positioned.push({ idx: m.index ?? 0, n })
+    }
   }
 
-  return out
+  return positioned.sort((a, b) => a.idx - b.idx).map((p) => p.n)
 }
 
 /**

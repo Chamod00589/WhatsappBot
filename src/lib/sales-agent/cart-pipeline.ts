@@ -13,6 +13,9 @@ import type {
 } from './cart-intent-extract'
 import {
   COLOR_ALIASES,
+  extractAllQtys,
+  extractColorsFromText,
+  parseColorOnlyReply,
   parseOrderPending,
   productDisplayName,
   resolveLineItems,
@@ -335,6 +338,7 @@ export function checkQuoteCompleteness(
 
 /**
  * Resolve extraction items → validated lines (or clarification payloads).
+ * Prefers LLM-selected productId / exact catalog name; falls back to alias needles.
  */
 export function resolveExtractionItems(
   extraction: CartIntentExtraction,
@@ -344,18 +348,51 @@ export function resolveExtractionItems(
   clarify?: { reason: CartClarifyReason; messageParts: MatchableQuickReply[]; line?: ResolvedCartLine; available?: string[] }
 } {
   const lines: ResolvedCartLine[] = []
+  const byId = new Map(
+    catalog.filter((c) => c.product_id).map((c) => [c.product_id as string, c]),
+  )
 
   for (const item of extraction.items) {
-    const resolved = resolveMentionedProduct(item.mentioned, catalog)
-    const confidence = combineConfidence(item.confidence, resolved.matchConfidence)
+    let qr: MatchableQuickReply | null = null
+    let matchConfidence = 0
+    let candidates: MatchableQuickReply[] = []
 
-    if (!resolved.qr) {
-      if (resolved.candidates.length) {
+    if (item.productId && byId.has(item.productId)) {
+      qr = byId.get(item.productId) || null
+      matchConfidence = 0.99
+      candidates = qr ? [qr] : []
+    } else if (item.name) {
+      const want = normalizeMatchText(item.name)
+      const exact = catalog.find(
+        (c) =>
+          normalizeMatchText(c.bagName || productDisplayName(c.title)) === want,
+      )
+      if (exact) {
+        qr = exact
+        matchConfidence = 0.97
+        candidates = [exact]
+      }
+    }
+
+    if (!qr) {
+      const resolved = resolveMentionedProduct(
+        item.mentioned || item.name || '',
+        catalog,
+      )
+      qr = resolved.qr
+      matchConfidence = resolved.matchConfidence
+      candidates = resolved.candidates
+    }
+
+    const confidence = combineConfidence(item.confidence, matchConfidence)
+
+    if (!qr) {
+      if (candidates.length) {
         return {
           lines: [],
           clarify: {
             reason: 'ambiguous_product',
-            messageParts: resolved.candidates,
+            messageParts: candidates,
           },
         }
       }
@@ -370,7 +407,7 @@ export function resolveExtractionItems(
         lines: [],
         clarify: {
           reason: 'low_confidence',
-          messageParts: [resolved.qr],
+          messageParts: [qr],
         },
       }
     }
@@ -383,15 +420,13 @@ export function resolveExtractionItems(
         lines: [],
         clarify: {
           reason: 'ambiguous_product',
-          messageParts: resolved.candidates.length
-            ? resolved.candidates
-            : [resolved.qr],
+          messageParts: candidates.length ? candidates : [qr],
         },
       }
     }
 
     const color = canonicalizeExtractedColor(item.color)
-    const colors = resolved.qr.colors ?? []
+    const colors = qr.colors ?? []
     let resolvedColor: string | null = color
     if (color && colors.length) {
       const v = validateProductColor(color, colors)
@@ -400,13 +435,11 @@ export function resolveExtractionItems(
           lines: [],
           clarify: {
             reason: 'invalid_color',
-            messageParts: [resolved.qr],
+            messageParts: [qr],
             available: v.available,
             line: {
-              productId: resolved.qr.product_id || '',
-              name:
-                resolved.qr.bagName ||
-                productDisplayName(resolved.qr.title),
+              productId: qr.product_id || '',
+              name: qr.bagName || productDisplayName(qr.title),
               color,
               qty: item.qty ?? 1,
               confidence,
@@ -421,18 +454,18 @@ export function resolveExtractionItems(
     if (!qtyRes.ok) {
       return {
         lines: [],
-        clarify: { reason: 'invalid_qty', messageParts: [resolved.qr] },
+        clarify: { reason: 'invalid_qty', messageParts: [qr] },
       }
     }
 
     lines.push({
-      productId: resolved.qr.product_id || '',
-      name: resolved.qr.bagName || productDisplayName(resolved.qr.title),
+      productId: qr.product_id || '',
+      name: qr.bagName || productDisplayName(qr.title),
       color: resolvedColor,
       qty: qtyRes.qty,
       confidence,
-      quickReplyId: resolved.qr.id,
-      catalogMessageId: resolved.qr.catalog_message_id,
+      quickReplyId: qr.id,
+      catalogMessageId: qr.catalog_message_id,
     })
   }
 
@@ -476,6 +509,118 @@ function pendingToResolved(
   }))
 }
 
+/** Pending lines that still need a color. */
+export function pendingMissingColor(
+  items: OrderPendingQuotedItem[],
+): OrderPendingQuotedItem[] {
+  return items.filter((it) => !String(it.color || '').trim())
+}
+
+/**
+ * Apply a color-only customer reply onto pending lines that lack color.
+ * Returns null when there is nothing to fill.
+ */
+export function applyColorOnlyToPending(
+  existing: OrderPendingQuotedItem[],
+  colorRaw: string,
+  catalog: MatchableQuickReply[],
+): {
+  items: OrderPendingQuotedItem[]
+  applied: boolean
+  invalidFor?: { name: string; available: string[] }
+} {
+  const colorCanon = canonicalizeExtractedColor(colorRaw)
+  if (!colorCanon || !pendingMissingColor(existing).length) {
+    return { items: existing, applied: false }
+  }
+
+  let applied = false
+  let invalidFor: { name: string; available: string[] } | undefined
+  const items = existing.map((e) => {
+    if (String(e.color || '').trim()) return e
+    const qr = catalog.find((c) => c.product_id === e.productId)
+    const v = validateProductColor(colorCanon, qr?.colors)
+    if (!v.ok) {
+      if (!invalidFor) {
+        invalidFor = {
+          name: e.name,
+          available: v.available,
+        }
+      }
+      return e
+    }
+    applied = true
+    return { ...e, color: v.color }
+  })
+  return { items, applied, invalidFor }
+}
+
+/**
+ * Deterministic fallback when LLM extract misses bag/color/qty pairing.
+ * Handles "Cloudy white 2i black 1kui denna" → Cloudy White×2 + Cloudy Black×1.
+ */
+export function heuristicLinesFromText(
+  text: string,
+  catalog: MatchableQuickReply[],
+): ResolvedCartLine[] {
+  const hits = matchProductsInText(text, catalog)
+  if (!hits.length) return []
+
+  const colors = extractColorsInAppearanceOrder(text)
+  const qtys = extractAllQtys(text)
+
+  // One bag + multiple colors → one line per color (zip qtys in order)
+  if (hits.length === 1 && colors.length >= 2) {
+    const hit = hits[0]
+    const pid = hit.product_id || ''
+    if (!pid) return []
+    return colors.map((color, i) => {
+      const v = validateProductColor(color, hit.colors)
+      return {
+        productId: pid,
+        name: hit.bagName || productDisplayName(hit.title),
+        color: v.ok ? v.color : color,
+        qty: qtys[i] ?? 1,
+        confidence: 0.95,
+        quickReplyId: hit.id,
+        catalogMessageId: hit.catalog_message_id,
+      }
+    })
+  }
+
+  // One bag + one color (or colors assigned by index across bags)
+  return hits
+    .map((hit, i) => {
+      const color = colors[i] || (colors.length === 1 ? colors[0] : null)
+      const v =
+        color && hit.colors?.length
+          ? validateProductColor(color, hit.colors)
+          : null
+      return {
+        productId: hit.product_id || '',
+        name: hit.bagName || productDisplayName(hit.title),
+        color: v?.ok ? v.color : color,
+        qty: qtys[i] ?? qtys[0] ?? 1,
+        confidence: 0.92,
+        quickReplyId: hit.id,
+        catalogMessageId: hit.catalog_message_id,
+      }
+    })
+    .filter((l) => l.productId)
+}
+
+/** Colors in the order they appear in the customer message (not catalog sort). */
+export function extractColorsInAppearanceOrder(text: string): string[] {
+  const all = extractColorsFromText(text)
+  if (all.length <= 1) return all
+  const n = normalizeMatchText(text)
+  return [...all].sort((a, b) => {
+    const ia = n.indexOf(normalizeMatchText(a))
+    const ib = n.indexOf(normalizeMatchText(b))
+    return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib)
+  })
+}
+
 async function sendClarify(
   args: {
     db: SupabaseClient
@@ -513,31 +658,189 @@ export async function runCartPipeline(args: {
   replyMode?: ReplyMode
   quotationEnabled: boolean
   editOrderEnabled: boolean
+  /** Latest customer burst — used for color-only replies + heuristic parse. */
+  burstText?: string
 }): Promise<CartPipelineResult> {
   const {
     db,
     conversationId,
-    extraction,
     productCatalog,
     useSinglish,
     quotationEnabled,
     editOrderEnabled,
   } = args
+  const burstText = args.burstText || ''
 
-  if (extraction.intent === 'none') {
-    return {
-      handled: false,
-      quoted: false,
-      clarified: false,
-      updated: false,
-      message: 'no cart intent',
+  const { data: conv } = await db
+    .from('conversations')
+    .select('sa_order_pending')
+    .eq('id', conversationId)
+    .maybeSingle()
+  const pending = parseOrderPending(conv?.sa_order_pending)
+  let existingPending: OrderPendingQuotedItem[] =
+    pending?.type === 'awaiting_address'
+      ? pending.items
+      : pending?.type === 'awaiting_color'
+        ? [
+            ...(pending.readyItems || []),
+            ...pending.bags.map((b) => ({
+              productId: b.productId || undefined,
+              name: b.name,
+              color: '',
+              qty: b.qty,
+              price: 0,
+            })),
+          ]
+        : []
+
+  // Color-only reply ("Black" / "Black color") while a bag awaits color.
+  const colorOnly = burstText.trim()
+    ? parseColorOnlyReply(burstText)
+    : null
+  if (colorOnly && pendingMissingColor(existingPending).length) {
+    const filled = applyColorOnlyToPending(
+      existingPending,
+      colorOnly,
+      productCatalog,
+    )
+    if (filled.invalidFor && !filled.applied) {
+      const text = buildColorAskMessage(
+        filled.invalidFor.name,
+        filled.invalidFor.available,
+        useSinglish,
+      )
+      await sendClarify(args, text)
+      return {
+        handled: true,
+        quoted: false,
+        clarified: true,
+        updated: false,
+        message: text,
+        clarifyReason: 'invalid_color',
+      }
+    }
+    if (filled.applied) {
+      existingPending = filled.items
+      // Continue below with a synthetic edit that quotes/updates the filled cart.
+      args = {
+        ...args,
+        extraction: {
+          intent: 'edit_cart',
+          operation: 'add',
+          items: [],
+          target: { mentioned: null, color: colorOnly },
+        },
+      }
     }
   }
 
-  const { lines: resolved, clarify } = resolveExtractionItems(
+  let extraction = args.extraction
+
+  // Color-only with nothing pending → not a cart turn
+  if (extraction.intent === 'none' && !pendingMissingColor(existingPending).length) {
+    // Still try heuristic if text clearly names bags (quote/edit without LLM)
+    const heuristicEarly = heuristicLinesFromText(burstText, productCatalog)
+    if (!heuristicEarly.length) {
+      return {
+        handled: false,
+        quoted: false,
+        clarified: false,
+        updated: false,
+        message: 'no cart intent',
+      }
+    }
+    extraction = {
+      intent: 'quotation',
+      operation: 'set',
+      items: heuristicEarly.map((l) => ({
+        productId: l.productId,
+        name: l.name,
+        mentioned: l.name,
+        qty: l.qty,
+        color: l.color,
+        confidence: l.confidence,
+      })),
+      target: { mentioned: null, color: null },
+    }
+  } else if (extraction.intent === 'none') {
+    // Pending needs color but message wasn't color-only — leave for tools
+    if (!colorOnly) {
+      return {
+        handled: false,
+        quoted: false,
+        clarified: false,
+        updated: false,
+        message: 'no cart intent',
+      }
+    }
+    extraction = {
+      intent: 'edit_cart',
+      operation: 'add',
+      items: [],
+      target: { mentioned: null, color: colorOnly },
+    }
+  }
+
+  let { lines: resolved, clarify } = resolveExtractionItems(
     extraction,
     productCatalog,
   )
+
+  // If LLM mentioned a color as the "product", don't ask for bag name —
+  // apply that color onto pending incomplete lines instead.
+  if (
+    clarify &&
+    (clarify.reason === 'unknown_product' ||
+      clarify.reason === 'ambiguous_product') &&
+    pendingMissingColor(existingPending).length
+  ) {
+    const fromItems = extraction.items
+      .map((i) => canonicalizeExtractedColor(i.color || i.mentioned))
+      .find(Boolean)
+    const colorGuess =
+      colorOnly ||
+      fromItems ||
+      canonicalizeExtractedColor(extraction.target.color) ||
+      (burstText ? parseColorOnlyReply(burstText) : null)
+    if (colorGuess) {
+      const filled = applyColorOnlyToPending(
+        existingPending,
+        colorGuess,
+        productCatalog,
+      )
+      if (filled.applied) {
+        existingPending = filled.items
+        resolved = []
+        clarify = undefined
+      }
+    }
+  }
+
+  // Heuristic fallback when extract failed to resolve products
+  if (
+    (clarify?.reason === 'unknown_product' ||
+      (!resolved.length && extraction.items.length > 0)) &&
+    burstText.trim()
+  ) {
+    const heuristic = heuristicLinesFromText(burstText, productCatalog)
+    if (heuristic.length) {
+      resolved = heuristic
+      clarify = undefined
+    }
+  }
+
+  // Also use heuristic when extract returned quotation/edit with empty items
+  // but the burst clearly names bags (e.g. LLM dropped "cloudy").
+  if (
+    !clarify &&
+    !resolved.length &&
+    !pendingMissingColor(existingPending).length &&
+    (extraction.intent === 'quotation' || extraction.intent === 'edit_cart') &&
+    burstText.trim()
+  ) {
+    const heuristic = heuristicLinesFromText(burstText, productCatalog)
+    if (heuristic.length) resolved = heuristic
+  }
 
   if (clarify) {
     let text = ''
@@ -579,19 +882,6 @@ export async function runCartPipeline(args: {
     }
   }
 
-  const { data: conv } = await db
-    .from('conversations')
-    .select('sa_order_pending')
-    .eq('id', conversationId)
-    .maybeSingle()
-  const pending = parseOrderPending(conv?.sa_order_pending)
-  const existingPending: OrderPendingQuotedItem[] =
-    pending?.type === 'awaiting_address'
-      ? pending.items
-      : pending?.type === 'awaiting_color'
-        ? [...(pending.readyItems || [])]
-        : []
-
   const operation: CartOperation =
     extraction.operation ||
     (extraction.intent === 'edit_cart' ? 'add' : 'set')
@@ -603,15 +893,22 @@ export async function runCartPipeline(args: {
     targetPid = t.qr?.product_id || null
   }
 
-  const nextPending = applyCartOperationToPending(
-    existingPending,
-    resolved,
-    operation,
-    {
-      productId: targetPid,
-      color: extraction.target.color,
-    },
-  )
+  // Color-only fill already applied → use pending as working set
+  const nextPending =
+    colorOnly &&
+    existingPending.length &&
+    !pendingMissingColor(existingPending).length &&
+    !resolved.length
+      ? existingPending
+      : applyCartOperationToPending(
+          existingPending,
+          resolved,
+          operation,
+          {
+            productId: targetPid,
+            color: extraction.target.color || colorOnly,
+          },
+        )
 
   const workingLines =
     nextPending.length > 0

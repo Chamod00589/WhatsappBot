@@ -382,6 +382,7 @@ export async function dispatchSalesAgentNow(
           messages: loopMessages,
           burstText,
           sessionExtra: systemExtra,
+          productCatalog: products,
         })
         extractUsage = extracted.usage
         log.step(
@@ -392,7 +393,9 @@ export async function dispatchSalesAgentNow(
 
         if (
           extracted.extraction.intent === 'quotation' ||
-          extracted.extraction.intent === 'edit_cart'
+          extracted.extraction.intent === 'edit_cart' ||
+          // Color-only / heuristic path inside pipeline even when LLM says none
+          Boolean(burstText.trim())
         ) {
           const pipe = await runCartPipeline({
             db,
@@ -407,6 +410,7 @@ export async function dispatchSalesAgentNow(
             replyMode,
             quotationEnabled: Boolean(config.quotation),
             editOrderEnabled: Boolean(config.editOrder),
+            burstText,
           })
           cartHandled = pipe.handled
           log.step(

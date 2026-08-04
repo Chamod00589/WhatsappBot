@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { parseCartIntentJson } from './cart-intent-extract'
 import {
   applyCartOperationToPending,
+  applyColorOnlyToPending,
   canonicalizeExtractedColor,
   checkQuoteCompleteness,
   combineConfidence,
+  heuristicLinesFromText,
   resolveExtractionItems,
   resolveMentionedProduct,
   validateProductColor,
@@ -54,24 +56,67 @@ function catalogFixture(): MatchableQuickReply[] {
 }
 
 describe('parseCartIntentJson', () => {
-  it('parses quotation intent with separate lines (no merge)', () => {
+  it('parses catalog-selected items with productId + name', () => {
     const parsed = parseCartIntentJson({
       intent: 'quotation',
       operation: 'set',
       items: [
-        { mentioned: 'mini bag', qty: 2, color: 'black', confidence: 0.96 },
-        { mentioned: 'cloudy', qty: 1, color: 'Pink', confidence: 0.9 },
+        {
+          productId: 'cloudy-1',
+          name: 'Cloudy Shoulder Bag',
+          mentioned: 'cloudy',
+          qty: 2,
+          color: 'White',
+          confidence: 0.98,
+        },
+        {
+          productId: 'cloudy-1',
+          name: 'Cloudy Shoulder Bag',
+          mentioned: 'cloudy',
+          qty: 1,
+          color: 'Black',
+          confidence: 0.98,
+        },
       ],
       target: { mentioned: null, color: null },
     })
     expect(parsed.intent).toBe('quotation')
     expect(parsed.items).toHaveLength(2)
-    expect(parsed.items[0].mentioned).toBe('mini bag')
+    expect(parsed.items[0].productId).toBe('cloudy-1')
+    expect(parsed.items[0].name).toBe('Cloudy Shoulder Bag')
     expect(parsed.items[0].qty).toBe(2)
+    expect(parsed.items[1].color).toBe('Black')
   })
 
   it('returns none on garbage', () => {
     expect(parseCartIntentJson('not json').intent).toBe('none')
+  })
+})
+
+describe('resolveExtractionItems with catalog productId', () => {
+  it('resolves by productId without needle matching', () => {
+    const resolved = resolveExtractionItems(
+      {
+        intent: 'quotation',
+        operation: 'set',
+        items: [
+          {
+            productId: 'cloudy-1',
+            name: 'Cloudy Shoulder Bag',
+            mentioned: 'cloudy white',
+            qty: 2,
+            color: 'White',
+            confidence: 0.99,
+          },
+        ],
+        target: { mentioned: null, color: null },
+      },
+      catalogFixture(),
+    )
+    expect(resolved.clarify).toBeUndefined()
+    expect(resolved.lines[0]?.productId).toBe('cloudy-1')
+    expect(resolved.lines[0]?.color).toBe('White')
+    expect(resolved.lines[0]?.qty).toBe(2)
   })
 })
 
@@ -99,7 +144,7 @@ describe('confidence gates', () => {
         intent: 'quotation',
         operation: 'set',
         items: [
-          { mentioned: 'mini bag', qty: 1, color: 'black', confidence: 0.7 },
+          { mentioned: 'mini bag', qty: 1, color: 'black', confidence: 0.7, productId: null, name: null },
         ],
         target: { mentioned: null, color: null },
       },
@@ -121,7 +166,7 @@ describe('confidence gates', () => {
         intent: 'quotation',
         operation: 'set',
         items: [
-          { mentioned: 'mini bag', qty: 1, color: 'black', confidence: 0.99 },
+          { mentioned: 'mini bag', qty: 1, color: 'black', confidence: 0.99, productId: null, name: null },
         ],
         target: { mentioned: null, color: null },
       },
@@ -239,6 +284,57 @@ describe('cart ops + completeness', () => {
       },
     ]
     expect(checkQuoteCompleteness(lines, catalogFixture()).ok).toBe(true)
+  })
+})
+
+describe('color-only reply onto pending', () => {
+  it('applies Black onto pending Bloom line missing color', () => {
+    const catalog: MatchableQuickReply[] = [
+      ...catalogFixture(),
+      {
+        id: 'qr-bloom',
+        title: 'Bloom Shoulder Bag Details Quick Reply',
+        description: null,
+        kind: 'catalog',
+        product_id: 'bloom-1',
+        catalog_message_id: 'qm_site_prod_bloom-1',
+        needles: buildProductNeedles('Bloom Shoulder Bag', 'bloom-1', ['bloom']),
+        bagName: 'Bloom Shoulder Bag',
+        retailPrice: 1200,
+        colors: ['White', 'Black', 'Brown', 'Pink', 'Tan'],
+        matchAliases: ['bloom'],
+      },
+    ]
+    const filled = applyColorOnlyToPending(
+      [
+        {
+          productId: 'bloom-1',
+          name: 'Bloom Shoulder Bag',
+          color: '',
+          qty: 1,
+          price: 0,
+        },
+      ],
+      'Black color',
+      catalog,
+    )
+    expect(filled.applied).toBe(true)
+    expect(filled.items[0].color).toBe('Black')
+  })
+})
+
+describe('heuristic multi-color same bag', () => {
+  it('parses Cloudy white 2i black 1kui denna into two lines', () => {
+    const lines = heuristicLinesFromText(
+      'Cloudy white 2i black 1kui denna',
+      catalogFixture(),
+    )
+    expect(lines).toHaveLength(2)
+    expect(lines[0].productId).toBe('cloudy-1')
+    expect(lines[0].color?.toLowerCase()).toBe('white')
+    expect(lines[0].qty).toBe(2)
+    expect(lines[1].color?.toLowerCase()).toBe('black')
+    expect(lines[1].qty).toBe(1)
   })
 })
 

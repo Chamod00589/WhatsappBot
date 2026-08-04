@@ -19,6 +19,8 @@ import {
   buildGeminiAttempts,
   shouldRetryGeminiAttempt,
 } from '@/lib/ai/providers/gemini'
+import type { MatchableQuickReply } from './match-products'
+import { productDisplayName } from './order-intent'
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
@@ -33,8 +35,14 @@ export type CartOperation =
   | null
 
 export type CartExtractedItem = {
+  /** Exact catalog product id when the model selected from the list. */
+  productId: string | null
+  /** Exact catalog name when selected from the list (preferred). */
+  name: string | null
+  /** Customer's words (fallback if name/productId missing). */
   mentioned: string
   qty: number | null
+  /** Must be one of that product's colors from the catalog list, or null. */
   color: string | null
   confidence: number
 }
@@ -59,36 +67,69 @@ const EMPTY_EXTRACTION: CartIntentExtraction = {
   target: { mentioned: null, color: null },
 }
 
-const EXTRACT_SYSTEM = `You extract shopping-cart intent from WhatsApp bag customers (Singlish/Tanglish/English).
-Return ONLY valid JSON (no markdown) matching:
+/** Format the full bag catalog for the extract prompt. */
+export function formatCatalogForExtract(
+  catalog: MatchableQuickReply[],
+  limit = 80,
+): string {
+  const lines: string[] = []
+  for (const q of catalog.slice(0, limit)) {
+    const name =
+      (q.bagName || productDisplayName(q.title) || q.title).trim() || q.title
+    const pid = q.product_id || ''
+    if (!pid && !name) continue
+    const price =
+      typeof q.retailPrice === 'number' && q.retailPrice > 0
+        ? `Rs ${q.retailPrice}`
+        : 'price n/a'
+    const colors =
+      q.colors && q.colors.length ? q.colors.join(', ') : 'colors n/a'
+    lines.push(
+      `- productId=${pid || '?'} | name=${name} | price=${price} | colors=[${colors}]`,
+    )
+  }
+  return lines.join('\n')
+}
+
+function buildExtractSystemPrompt(catalogBlock: string): string {
+  return `You are a cart parser for Ladies Bags WhatsApp (Singlish/Tanglish/English).
+You are given the FULL product catalog below. When the customer asks for bag(s), SELECT only from that list.
+
+Return ONLY valid JSON (no markdown):
 {
   "intent": "quotation" | "edit_cart" | "none",
   "operation": "set" | "add" | "add_qty" | "replace_qty" | "remove" | null,
   "items": [
-    { "mentioned": "customer words for the bag", "qty": number|null, "color": string|null, "confidence": 0-1 }
+    {
+      "productId": "exact productId from catalog",
+      "name": "exact name from catalog",
+      "mentioned": "customer words that matched this bag",
+      "qty": number,
+      "color": "exact color spelling from that product's colors list, or null",
+      "confidence": 0-1
+    }
   ],
   "target": { "mentioned": string|null, "color": string|null }
 }
 
 Rules:
-- Extract ONLY what the customer said. Never invent catalog product names, product IDs, or prices.
-- Keep each bag as a separate items[] entry — do NOT merge lines (server merges).
-- mentioned = the customer's words (e.g. "mini bag", "cloudy", "meka").
-- color = Latin or Singlish color word if stated, else null. Do not invent colors.
-- qty = explicit count if stated (dekak=2, thunak=3, "2k"=2), else null.
-- confidence = how sure you are they mean a specific bag mention (0-1).
-- intent=quotation when they ask price / kochchara / quote / want bags with prices.
-- intent=edit_cart when they add/remove/change qty/color on an existing cart ("thawa dekak", "eka ain", "2 wenna").
-- intent=none for FAQ, delivery time, greetings, address-only, or unrelated chat.
-- operation:
-  - set = new cart / replace listing of bags
-  - add = add new bag line(s)
-  - add_qty = increase qty on last/target bag ("thawa dekak")
-  - replace_qty = set qty on last/target ("2 wenna")
-  - remove = remove a bag ("eka ain karanna")
-  - null when intent is none or unclear
-- target.mentioned / target.color = which existing line to edit when operation is add_qty/replace_qty/remove and they named one.
-- Never output prices or product IDs.`
+- ALWAYS pick productId + name from the CATALOG LIST. Never invent bags not on the list.
+- color MUST be copied exactly from that product's colors=[...] when the customer stated a color. If they did not say a color, use null (server will ask).
+- qty = how many pieces they want. Understand Singlish freely (dekak=2, thunak=3, "2k"/"2i"=2, "1kui"=1, "ekak"=1). Default qty=1 when they want the bag but gave no count.
+- Keep each bag/color as a SEPARATE items[] row — do NOT merge. Same bag in two colors = two items.
+- Example: "Cloudy white 2i black 1k" → two items: Cloudy White qty 2 + Cloudy Black qty 1 (same productId, different colors).
+- confidence = how sure the catalog match is (0-1). Use ≥0.9 when productId is clear.
+- intent=quotation when they ask price / kochchara / quote / want bags.
+- intent=edit_cart when they add/remove/change qty/color on an existing cart, OR reply with ONLY a color ("Black", "Black color") after being asked — then set target.color and items may be empty.
+- intent=none for FAQ, delivery time, greetings, address-only, unrelated chat.
+- operation: set | add | add_qty | replace_qty | remove | null
+- Prices in the catalog are for your understanding only — do NOT invent different prices; the server will quote from the database.
+- Never invent productIds or colors not listed for that product.
+
+CATALOG (select ONLY from here):
+${catalogBlock || '(empty catalog)'}
+`
+}
 
 /**
  * Parse model JSON into a safe CartIntentExtraction (for tests + live path).
@@ -131,8 +172,19 @@ export function parseCartIntentJson(raw: unknown): CartIntentExtraction {
   for (const it of itemsRaw) {
     if (!it || typeof it !== 'object') continue
     const row = it as Record<string, unknown>
-    const mentioned = typeof row.mentioned === 'string' ? row.mentioned.trim() : ''
-    if (!mentioned) continue
+    const productId =
+      typeof row.productId === 'string' && row.productId.trim()
+        ? row.productId.trim()
+        : typeof row.product_id === 'string' && row.product_id.trim()
+          ? row.product_id.trim()
+          : null
+    const name =
+      typeof row.name === 'string' && row.name.trim() ? row.name.trim() : null
+    const mentioned =
+      typeof row.mentioned === 'string' && row.mentioned.trim()
+        ? row.mentioned.trim()
+        : name || productId || ''
+    if (!mentioned && !productId && !name) continue
     const qtyNum = Number(row.qty)
     const qty =
       row.qty == null || row.qty === ''
@@ -143,9 +195,18 @@ export function parseCartIntentJson(raw: unknown): CartIntentExtraction {
     const color =
       typeof row.color === 'string' && row.color.trim() ? row.color.trim() : null
     let confidence = Number(row.confidence)
-    if (!Number.isFinite(confidence)) confidence = 0.5
+    if (!Number.isFinite(confidence)) {
+      confidence = productId || name ? 0.95 : 0.5
+    }
     confidence = Math.max(0, Math.min(1, confidence))
-    items.push({ mentioned, qty, color, confidence })
+    items.push({
+      productId,
+      name,
+      mentioned: mentioned || name || productId || '',
+      qty,
+      color,
+      confidence,
+    })
   }
 
   const targetObj =
@@ -167,24 +228,30 @@ export function parseCartIntentJson(raw: unknown): CartIntentExtraction {
 }
 
 /**
- * LLM JSON-only cart intent extraction. Does not decide products or prices.
+ * LLM selects bags from the provided catalog list (name/qty/color/productId).
+ * Server still validates colors and fills quote prices from DB.
  */
 export async function extractCartIntent(args: {
   config: AiConfig
   messages: ChatMessage[]
   burstText: string
   sessionExtra?: string
+  productCatalog?: MatchableQuickReply[]
 }): Promise<CartExtractResult> {
   const { config, burstText } = args
   if (!burstText.trim()) {
     return { extraction: { ...EMPTY_EXTRACTION }, usage: null, raw: '' }
   }
 
+  const catalogBlock = formatCatalogForExtract(args.productCatalog || [])
+  const systemPrompt = buildExtractSystemPrompt(catalogBlock)
+
   const userContent = [
     args.sessionExtra?.trim()
-      ? `Current order state:\n${args.sessionExtra.trim()}`
+      ? `Current order / session state:\n${args.sessionExtra.trim()}`
       : '',
     `Latest customer message(s):\n${burstText.trim()}`,
+    'Select matching bags from the catalog in the system prompt. Return JSON only.',
   ]
     .filter(Boolean)
     .join('\n\n')
@@ -194,7 +261,7 @@ export async function extractCartIntent(args: {
     { role: 'user', content: userContent },
   ]
 
-  const { text, usage } = await callJsonModel(config, EXTRACT_SYSTEM, messages)
+  const { text, usage } = await callJsonModel(config, systemPrompt, messages)
   return {
     extraction: parseCartIntentJson(text),
     usage,
@@ -218,8 +285,6 @@ async function callJsonModel(
           : OPENAI_URL
 
   if (config.provider === 'anthropic' || !url) {
-    // Anthropic tool-loop uses a different path; for extract use OpenAI-compat if key looks usable,
-    // otherwise return empty so dispatch falls through to FAQ tools.
     return { text: '', usage: null }
   }
 
@@ -242,7 +307,7 @@ async function callJsonModel(
       temperature: 0,
     }
     if (config.provider === 'openrouter') {
-      body.max_tokens = Math.min(MAX_OUTPUT_TOKENS, 512)
+      body.max_tokens = Math.min(MAX_OUTPUT_TOKENS, 800)
       body.provider = openRouterProviderPreferences(model)
       if (withFallbacks) {
         const fallbacks = openRouterFallbackModels(model)
@@ -250,9 +315,9 @@ async function callJsonModel(
       }
       body.response_format = { type: 'json_object' }
     } else if (config.provider === 'gemini') {
-      body.max_tokens = Math.min(MAX_OUTPUT_TOKENS, 512)
+      body.max_tokens = Math.min(MAX_OUTPUT_TOKENS, 800)
     } else {
-      body.max_completion_tokens = Math.min(MAX_OUTPUT_TOKENS, 512)
+      body.max_completion_tokens = Math.min(MAX_OUTPUT_TOKENS, 800)
       body.response_format = { type: 'json_object' }
     }
 
