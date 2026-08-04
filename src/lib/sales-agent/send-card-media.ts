@@ -4,6 +4,10 @@ import { engineSendMedia } from '@/lib/flows/meta-send'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import { uploadWhatsAppMedia } from '@/lib/whatsapp/meta-api'
 import { supabaseAdmin } from '@/lib/flows/admin-client'
+import {
+  enqueueConversationSend,
+  sleepMs,
+} from '@/lib/whatsapp/outbound-send-queue'
 
 export type CardMediaDebug = {
   bytes: number
@@ -18,6 +22,9 @@ export type CardMediaDebug = {
 /**
  * Upload a generated card image to chat-media (inbox preview) and send
  * via Meta media id (reliable). Falls back to public link if Meta upload fails.
+ *
+ * Queued on the same conversation chain as Product QRs so a quotation /
+ * address card never starts while a multi-image QR is still sending.
  */
 export async function sendGeneratedCardImage(args: {
   db: SupabaseClient
@@ -28,6 +35,23 @@ export async function sendGeneratedCardImage(args: {
   /** JPEG or PNG bytes */
   bytes: Buffer
   /** e.g. order-123.jpg */
+  filename: string
+  mimeType?: 'image/jpeg' | 'image/png'
+  caption?: string
+  contextSummary: string
+}): Promise<CardMediaDebug> {
+  return enqueueConversationSend(args.conversationId, () =>
+    sendGeneratedCardImageUnlocked(args),
+  )
+}
+
+async function sendGeneratedCardImageUnlocked(args: {
+  db: SupabaseClient
+  accountId: string
+  conversationId: string
+  contactId: string
+  configOwnerUserId: string
+  bytes: Buffer
   filename: string
   mimeType?: 'image/jpeg' | 'image/png'
   caption?: string
@@ -125,6 +149,9 @@ export async function sendGeneratedCardImage(args: {
       })
       .eq('id', sent.message_id)
   }
+
+  // Brief settle so a following Address / product QR does not overlap.
+  await sleepMs(800)
 
   return {
     bytes: bytes.byteLength,

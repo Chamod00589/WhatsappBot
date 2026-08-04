@@ -1,8 +1,9 @@
 /**
  * Send a catalog quick-reply (product or custom from ladiesbags admin).
  *
- * Prefer Meta `link` send when images are JPEG/PNG (from Prepare JPEGs).
- * Fall back to download→convert→upload only for leftover WebP URLs.
+ * Images are always uploaded to Meta then sent by media id (not link).
+ * Link sends race inside Meta's async URL fetch and mix images when two
+ * Product QRs go out back-to-back. Sends are also serialized per conversation.
  * CRM chat stores ONLY the short stub title.
  */
 
@@ -11,7 +12,6 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { prepareCatalogImageForWhatsApp } from '@/lib/catalog/prepare-image'
 import {
   fetchCatalogQuickMessage,
-  isMetaFriendlyImageUrl,
   stubTitleForCatalogMessage,
   type CatalogQuickMessage,
 } from '@/lib/catalog/products'
@@ -29,6 +29,15 @@ import {
 } from '@/lib/whatsapp/phone-utils'
 import { SendMessageError } from '@/lib/whatsapp/send-message'
 import { supabaseAdmin } from '@/lib/flows/admin-client'
+import {
+  enqueueConversationSend,
+  sleepMs,
+} from '@/lib/whatsapp/outbound-send-queue'
+
+/** Pause between images inside one Product QR. */
+const BETWEEN_IMAGES_MS = 900
+/** After a full QR finishes, let Meta deliver before the next QR starts. */
+const AFTER_QR_SETTLE_MS = 2200
 
 export interface ProductQuickReplySendResult {
   ok: boolean
@@ -199,6 +208,19 @@ async function deliverCatalogMessage(
   msg: CatalogQuickMessage,
   stubTitle?: string | null,
 ): Promise<ProductQuickReplySendResult> {
+  // Serialize every catalog QR on this chat — never overlap two products.
+  return enqueueConversationSend(conversationId, () =>
+    deliverCatalogMessageUnlocked(db, accountId, conversationId, msg, stubTitle),
+  )
+}
+
+async function deliverCatalogMessageUnlocked(
+  db: SupabaseClient,
+  accountId: string,
+  conversationId: string,
+  msg: CatalogQuickMessage,
+  stubTitle?: string | null,
+): Promise<ProductQuickReplySendResult> {
   const imageUrls = [...(msg.imageUrls || [])]
   const captionRaw = msg.text || msg.title
   const caption = captionRaw.length > 1024 ? captionRaw.slice(0, 1024) : captionRaw
@@ -245,57 +267,38 @@ async function deliverCatalogMessage(
     lastPersistedId = data.id as string
   }
 
-  // Send images one-by-one; never start the next until Meta ack + persist done.
+  // Send images one-by-one via Meta media id (not link). Link sends race
+  // inside Meta's async URL fetch and mix images across consecutive QRs.
   for (let i = 0; i < imageUrls.length; i++) {
     const url = imageUrls[i]
     // Full Sinhala caption goes to the customer on the first image only.
     const imageCaption = i === 0 ? caption : undefined
     try {
-      if (msg.jpegReady || isMetaFriendlyImageUrl(url)) {
-        lastWamid = await withPhoneRetry(
-          ctx.sanitizedPhone,
-          ctx.contactId,
-          db,
-          async (phone) => {
-            const result = await sendMediaMessage({
-              phoneNumberId: ctx.phoneNumberId,
-              accessToken: ctx.accessToken,
-              to: phone,
-              kind: 'image',
-              link: url,
-              caption: imageCaption,
-            })
-            return result.messageId
-          },
-        )
-        usedDirectLinks += 1
-      } else {
-        const prepared = await prepareCatalogImageForWhatsApp(url)
-        const uploaded = await uploadWhatsAppMedia({
-          phoneNumberId: ctx.phoneNumberId,
-          accessToken: ctx.accessToken,
-          bytes: prepared.bytes,
-          mimeType: prepared.mimeType,
-          filename: prepared.filename,
-        })
-        lastWamid = await withPhoneRetry(
-          ctx.sanitizedPhone,
-          ctx.contactId,
-          db,
-          async (phone) => {
-            const result = await sendMediaMessage({
-              phoneNumberId: ctx.phoneNumberId,
-              accessToken: ctx.accessToken,
-              to: phone,
-              kind: 'image',
-              id: uploaded.id,
-              caption: imageCaption,
-            })
-            return result.messageId
-          },
-        )
-        usedUploadConvert += 1
-      }
+      const prepared = await prepareCatalogImageForWhatsApp(url)
+      const uploaded = await uploadWhatsAppMedia({
+        phoneNumberId: ctx.phoneNumberId,
+        accessToken: ctx.accessToken,
+        bytes: prepared.bytes,
+        mimeType: prepared.mimeType,
+        filename: prepared.filename,
+      })
+      lastWamid = await withPhoneRetry(
+        ctx.sanitizedPhone,
+        ctx.contactId,
+        db,
+        async (phone) => {
+          const result = await sendMediaMessage({
+            phoneNumberId: ctx.phoneNumberId,
+            accessToken: ctx.accessToken,
+            to: phone,
+            kind: 'image',
+            id: uploaded.id,
+            caption: imageCaption,
+          })
+          return result.messageId
+        },
+      )
+      usedUploadConvert += 1
 
       // Persist each image with its Meta wamid + public URL so inbound
       // swipe-replies can resolve and show the quoted thumbnail.
@@ -309,7 +312,7 @@ async function deliverCatalogMessage(
 
       // Gap between images in the same QR (and before leaving this QR).
       if (i < imageUrls.length - 1) {
-        await new Promise((r) => setTimeout(r, 600))
+        await sleepMs(BETWEEN_IMAGES_MS)
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)
@@ -382,6 +385,9 @@ async function deliverCatalogMessage(
     // best-effort
   }
 
+  // Settle before the next Product / Address / Quotation QR can start.
+  await sleepMs(AFTER_QR_SETTLE_MS)
+
   return {
     ok: imagesSent > 0 || textSent,
     stubMessageId: lastPersistedId,
@@ -396,3 +402,4 @@ async function deliverCatalogMessage(
     failures,
   }
 }
+
