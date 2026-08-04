@@ -46,8 +46,12 @@ function parseColorSwapHint(
   const raw = text.replace(/\s+/g, ' ').trim()
   if (!raw) return null
   const t = raw.toLowerCase()
-  if (!/\b(ain|nathiwa|nathuwa|remove|without)\b/.test(t)) return null
-  if (!/\b(eken|oni|onne|denna|want|ganna|ganne)\b/.test(t)) return null
+  const hasRemove = /\b(ain|nathiwa|nathuwa|remove|without|epa)\b/.test(t)
+  const hasWant =
+    /\b(eken|oni|onne|denna|want|ganna|ganne|ekathu|ekathukaranna|athukaranna|ekath\s*karanna)\b/.test(
+      t,
+    )
+  if (!hasRemove || !hasWant) return null
   const clauses = raw
     .split(/[.!?\n]+|(?=\bmeke\b)|(?=\bthawa\b)/i)
     .map((s) => s.trim())
@@ -58,17 +62,25 @@ function parseColorSwapHint(
     const colors = extractColorsFromText(clause)
     if (!colors.length) continue
     const sl = clause.toLowerCase()
-    const isRemove = /\b(ain|nathiwa|nathuwa|remove|without)\b/.test(sl)
+    const ainThenColor = /\bain\s+kara(?:la|nna)?\s+\S+/.test(sl)
+    const isRemove =
+      /\b(ain|nathiwa|nathuwa|remove|without|epa)\b/.test(sl) && !ainThenColor
     const isWant =
-      /\b(eken|denna|want)\b/.test(sl) ||
+      /\b(eken|denna|want|ekathu|ekathukaranna|athukaranna)\b/.test(sl) ||
+      ainThenColor ||
       (/\b(oni|onne|ganna|ganne)\b/.test(sl) && !isRemove)
     if (isRemove) remove = colors[colors.length - 1]
-    if (isWant && !isRemove) want = colors[0]
+    if (isWant && (!isRemove || ainThenColor)) want = colors[0]
   }
   if ((!want || !remove) && extractColorsFromText(raw).length >= 2) {
     const all = extractColorsFromText(raw)
-    want = want || all[0]
-    remove = remove || all[all.length - 1]
+    if (/\bepa\b/.test(t) || /\bain\s+kara/.test(t)) {
+      remove = remove || all[0]
+      want = want || all[all.length - 1]
+    } else {
+      want = want || all[0]
+      remove = remove || all[all.length - 1]
+    }
   }
   if (
     want &&

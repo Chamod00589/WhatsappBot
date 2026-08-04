@@ -183,6 +183,8 @@ export function isAddToOrderRequest(text: string): boolean {
   return (
     /\b(add|added|adding)\b/.test(t) ||
     /\b(ekakuth|ekak\s*uth|ekakath|ekath)\b/.test(t) ||
+    // "ekathukaranna" / "athukaranna" = add together (compound word, no \b after ekath)
+    /\b(ekathukaranna|ekathu\s*karanna|athukaranna)\b/.test(t) ||
     // "dekakuth" = two more also; "thunakuth" = three more
     /\b(dekakuth|dekak\s*uth|deka\s*uth|thunakuth|thunak\s*uth)\b/.test(t) ||
     /\b(thawa|another|plus)\b/.test(t) ||

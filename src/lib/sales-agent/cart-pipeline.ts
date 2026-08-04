@@ -39,10 +39,18 @@ export const CART_CONFIDENCE_AUTO = 0.9
 export const CART_CONFIDENCE_ASK = 0.6
 export const CART_MAX_QTY = 50
 
+/** Want-side cues: include "ekathukaranna" / "athukaranna" (add together). */
+const COLOR_SWAP_WANT_RE =
+  /\b(eken|oni|onne|denna|want|ganna|ganne|ekathu|ekathukaranna|athukaranna|ekath\s*karanna)\b/
+const COLOR_SWAP_REMOVE_RE =
+  /\b(ain|nathiwa|nathuwa|remove|without|epa)\b/
+
 /**
  * "White eken oni + brown ain karanna" → want White, remove Brown.
  * Prefer per-clause matching so "oni" in the want sentence does not
  * also tag the remove sentence.
+ * "White epa … brown 3k ekathukaranna" → remove White, want Brown
+ * ("ain karala COLOR" treats COLOR as want, not remove).
  */
 export function parseColorSwapRequest(
   text: string,
@@ -50,8 +58,8 @@ export function parseColorSwapRequest(
   const raw = text.replace(/\s+/g, ' ').trim()
   if (!raw) return null
   const t = raw.toLowerCase()
-  const hasRemove = /\b(ain|nathiwa|nathuwa|remove|without)\b/.test(t)
-  const hasWant = /\b(eken|oni|onne|denna|want|ganna|ganne)\b/.test(t)
+  const hasRemove = COLOR_SWAP_REMOVE_RE.test(t)
+  const hasWant = COLOR_SWAP_WANT_RE.test(t)
   if (!hasRemove || !hasWant) return null
 
   const clauses = raw
@@ -66,19 +74,28 @@ export function parseColorSwapRequest(
     const colors = extractColorsFromText(clause)
     if (!colors.length) continue
     const sl = clause.toLowerCase()
-    const isRemove = /\b(ain|nathiwa|nathuwa|remove|without)\b/.test(sl)
+    // "ain karala brown" → color AFTER ain is the replacement (not the remove)
+    const ainThenColor = /\bain\s+kara(?:la|nna)?\s+\S+/.test(sl)
+    const isRemove = COLOR_SWAP_REMOVE_RE.test(sl) && !ainThenColor
     const isWant =
-      /\b(eken|denna|want)\b/.test(sl) ||
+      COLOR_SWAP_WANT_RE.test(sl) ||
+      ainThenColor ||
       (/\b(oni|onne|ganna|ganne)\b/.test(sl) && !isRemove)
     if (isRemove) remove = colors[colors.length - 1]
-    if (isWant && !isRemove) want = colors[0]
+    if (isWant && (!isRemove || ainThenColor)) want = colors[0]
   }
 
-  // Fallback: first color = want, last = remove when both cues in one clause
+  // Fallback when remove cue is "epa" on first color and want is later color
   if ((!want || !remove) && extractColorsFromText(raw).length >= 2) {
     const all = extractColorsFromText(raw)
-    want = want || all[0]
-    remove = remove || all[all.length - 1]
+    // "White … epa … brown …" → first=remove, last=want (common Singlish order)
+    if (/\bepa\b/.test(t) || /\bain\s+kara/.test(t)) {
+      remove = remove || all[0]
+      want = want || all[all.length - 1]
+    } else {
+      want = want || all[0]
+      remove = remove || all[all.length - 1]
+    }
   }
 
   if (
@@ -89,6 +106,128 @@ export function parseColorSwapRequest(
     return { want, remove }
   }
   return null
+}
+
+/**
+ * Color named with remove language ("White eka epa", "sudu ain").
+ * Skips colors that only appear after "ain karala" (those are replacements).
+ */
+export function pickRemoveColorFromText(text: string): string | null {
+  const raw = text.replace(/\s+/g, ' ').trim()
+  if (!raw) return null
+  const clauses = raw
+    .split(/[.!?\n]+|(?=\bmeke\b)|(?=\bthawa\b)/i)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  for (const clause of clauses.length ? clauses : [raw]) {
+    const sl = clause.toLowerCase()
+    if (/\bain\s+kara(?:la|nna)?\s+\S+/.test(sl)) continue
+    if (!COLOR_SWAP_REMOVE_RE.test(sl)) continue
+    const colors = extractColorsFromText(clause)
+    if (colors.length) {
+      return canonicalizeExtractedColor(colors[0])
+    }
+  }
+  return null
+}
+
+/**
+ * Remove a color from the cart, then upsert replacement lines (absolute qty).
+ * "White epa + brown 3k" → drop White lines, set Brown qty 3, keep other bags.
+ */
+export function applyColorReplaceToPending(
+  existing: OrderPendingQuotedItem[],
+  incoming: ResolvedCartLine[],
+  removeColor: string,
+): OrderPendingQuotedItem[] {
+  const removeN = normalizeMatchText(removeColor)
+  if (!removeN) return existing
+
+  let next = existing.filter(
+    (e) => normalizeMatchText(e.color || '') !== removeN,
+  )
+
+  for (const line of incoming) {
+    if (!line.productId) continue
+    const color = canonicalizeExtractedColor(line.color)
+    if (!color) continue
+    if (normalizeMatchText(color) === removeN) continue
+    const qty = Math.max(1, Number(line.qty) || 1)
+    const idx = next.findIndex((n) => {
+      const sameProduct = n.productId === line.productId
+      return (
+        sameProduct &&
+        normalizeMatchText(n.color || '') === normalizeMatchText(color)
+      )
+    })
+    if (idx >= 0) {
+      next[idx] = {
+        ...next[idx],
+        name: line.name || next[idx].name,
+        color,
+        qty,
+      }
+    } else {
+      next.push({
+        productId: line.productId,
+        name: line.name,
+        color,
+        qty,
+        price: 0,
+      })
+    }
+  }
+  return next
+}
+
+/**
+ * Incoming line is a NEW color for a product already in the cart
+ * (White in cart + Brown incoming). Same-color restatement (Pink→Pink)
+ * is NOT a color change even if the product also has other colors.
+ */
+export function incomingIsColorChange(
+  existing: OrderPendingQuotedItem[],
+  incoming: ResolvedCartLine[],
+): boolean {
+  return incoming.some((line) => {
+    if (!line.productId || !line.color) return false
+    const want = normalizeMatchText(line.color)
+    const sameProduct = existing.filter((e) => e.productId === line.productId)
+    if (!sameProduct.length) return false
+    const hasExactColor = sameProduct.some(
+      (e) => normalizeMatchText(e.color || '') === want,
+    )
+    return !hasExactColor
+  })
+}
+
+/**
+ * Remove-language + a different-color incoming line → compound color replace
+ * (not plain remove, not replace_qty on the old color).
+ */
+export function isColorReplaceEdit(args: {
+  burstText: string
+  removeColor: string | null | undefined
+  incoming: ResolvedCartLine[]
+  existing: OrderPendingQuotedItem[]
+}): boolean {
+  const { burstText, existing, incoming } = args
+  const removeColor = canonicalizeExtractedColor(args.removeColor || null)
+  if (!existing.length || !removeColor || !incoming.length) return false
+  const removeN = normalizeMatchText(removeColor)
+  const hasRemoveLine = existing.some(
+    (e) => normalizeMatchText(e.color || '') === removeN,
+  )
+  if (!hasRemoveLine) return false
+  const replacements = incoming.filter((l) => {
+    const c = canonicalizeExtractedColor(l.color)
+    return Boolean(c && normalizeMatchText(c) !== removeN)
+  })
+  if (!replacements.length) return false
+  return (
+    looksLikeColorRemoveRequest(burstText) ||
+    Boolean(parseColorSwapRequest(burstText))
+  )
 }
 
 export function orderItemsToPendingQuoted(
@@ -519,12 +658,21 @@ export function coerceCartOperation(args: {
     pendingLineOverlapsIncoming(existing, incoming)
 
   // Restating desired qty for a bag already in cart must SET, not SUM.
+  // Never coerce when removing/replacing a color — that becomes
+  // replace_qty on the OLD color (White×3 instead of Brown×3).
   if (
     overlaps &&
     absolute &&
     !additive &&
     (op === 'add' || op === 'add_qty')
   ) {
+    if (
+      looksLikeColorRemoveRequest(burstText) ||
+      incomingIsColorChange(existing, incoming) ||
+      Boolean(parseColorSwapRequest(burstText))
+    ) {
+      return op
+    }
     return 'replace_qty'
   }
 
@@ -1079,8 +1227,30 @@ export async function runCartPipeline(args: {
     qty: it.qty,
   }))
 
-  // Deterministic color swap ("white eken + brown ain") on live order / cart
-  if (colorSwap && existingPending.length && editOrderEnabled && recentOrder) {
+  // Deterministic color swap ("white eken + brown ain") on live order / cart.
+  // Skip when customer also stated a new qty — swap alone keeps old qty;
+  // main extract path does remove + upsert with the stated count.
+  const swapDeferToExtract =
+    looksLikeAbsoluteQtyDesire(burstText) ||
+    isAddToOrderRequest(burstText) ||
+    (args.extraction.items.length > 0 &&
+      args.extraction.items.some(
+        (it) =>
+          it.qty != null &&
+          it.qty > 0 &&
+          canonicalizeExtractedColor(it.color) &&
+          colorSwap &&
+          normalizeMatchText(canonicalizeExtractedColor(it.color) || '') ===
+            normalizeMatchText(colorSwap.want),
+      ))
+
+  if (
+    colorSwap &&
+    existingPending.length &&
+    editOrderEnabled &&
+    recentOrder &&
+    !swapDeferToExtract
+  ) {
     const swapped = applyColorSwapToPending(existingPending, colorSwap)
     if (swapped !== existingPending) {
       const verify = await verifyCartChange({
@@ -1155,7 +1325,12 @@ export async function runCartPipeline(args: {
       }
     }
   }
-  if (colorSwap && existingPending.length && !recentOrder) {
+  if (
+    colorSwap &&
+    existingPending.length &&
+    !recentOrder &&
+    !swapDeferToExtract
+  ) {
     existingPending = applyColorSwapToPending(existingPending, colorSwap)
     // Fall through to re-quote with swapped pending
     args = {
@@ -1364,11 +1539,31 @@ export async function runCartPipeline(args: {
     }
   }
 
+  // Color replace ("White epa + brown 3k") — use extract lines only (before
+  // photo-merge), remove target color, upsert replacement with absolute qty.
+  // Must run before coerce/remove or photo-merge turns this into replace_qty
+  // on the old White line.
+  const removeColorHint =
+    canonicalizeExtractedColor(extraction.target.color) ||
+    pickRemoveColorFromText(burstText) ||
+    parseColorSwapRequest(burstText)?.remove ||
+    null
+  const colorReplace =
+    existingPending.length > 0 &&
+    isColorReplaceEdit({
+      burstText,
+      removeColor: removeColorHint,
+      incoming: resolved,
+      existing: existingPending,
+    })
+
   // Photo bags saved by early identify must not be wiped when extract only
   // returns the named bag ("this bag and puff Pink 2" → keep Mini + Puff).
   // Keep photo bags when extract only returned the named bag — but never on
-  // remove (would turn "remove white" into remove Mini+White targets).
+  // remove (would turn "remove white" into remove Mini+White targets),
+  // and never on color-replace (would poison coerce via unrelated overlaps).
   if (
+    !colorReplace &&
     existingPending.length &&
     resolved.length &&
     extraction.operation !== 'remove' &&
@@ -1377,17 +1572,24 @@ export async function runCartPipeline(args: {
     resolved = mergePhotoPendingIntoResolved(existingPending, resolved)
   }
 
-  let operation: CartOperation = coerceCartOperation({
-    burstText,
-    operation: extraction.operation,
-    intent: extraction.intent,
-    existing: existingPending,
-    incoming: resolved,
-  })
-  // "sudu/white … epa/ain" must stay remove even if LLM said add/set
+  let operation: CartOperation = colorReplace
+    ? 'set'
+    : coerceCartOperation({
+        burstText,
+        operation: extraction.operation,
+        intent: extraction.intent,
+        existing: existingPending,
+        incoming: resolved,
+      })
+  // Pure remove only — do not force remove when a replacement color is present
   if (
+    !colorReplace &&
     looksLikeColorRemoveRequest(burstText) &&
-    (operation === 'add' || operation === 'set' || !operation)
+    (operation === 'add' ||
+      operation === 'set' ||
+      operation === 'replace_qty' ||
+      operation === 'add_qty' ||
+      !operation)
   ) {
     operation = 'remove'
   }
@@ -1399,21 +1601,38 @@ export async function runCartPipeline(args: {
   }
 
   // Color-only fill already applied → use pending as working set
-  const nextPending =
+  let nextPending: OrderPendingQuotedItem[]
+  if (
     colorOnly &&
     existingPending.length &&
     !pendingMissingColor(existingPending).length &&
     !resolved.length
-      ? existingPending
-      : applyCartOperationToPending(
-          existingPending,
-          resolved,
-          operation,
-          {
-            productId: targetPid,
-            color: extraction.target.color || colorOnly,
-          },
-        )
+  ) {
+    nextPending = existingPending
+  } else if (colorReplace && removeColorHint) {
+    const replacementLines = resolved.filter((l) => {
+      const c = canonicalizeExtractedColor(l.color)
+      return Boolean(
+        c &&
+          normalizeMatchText(c) !== normalizeMatchText(removeColorHint),
+      )
+    })
+    nextPending = applyColorReplaceToPending(
+      existingPending,
+      replacementLines,
+      removeColorHint,
+    )
+  } else {
+    nextPending = applyCartOperationToPending(
+      existingPending,
+      resolved,
+      operation,
+      {
+        productId: targetPid,
+        color: extraction.target.color || colorOnly,
+      },
+    )
+  }
 
   const workingLines =
     nextPending.length > 0

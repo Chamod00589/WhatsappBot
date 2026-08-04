@@ -126,12 +126,13 @@ Rules:
 - intent=none for FAQ, delivery time, greetings, address-only, unrelated chat, OR when they only ask for photos / colors / details / info of a bag (server sends the product card — do NOT quote).
 - Example: "Cloudy bag eketh photos ewanawada" → intent=none (photos ask).
 - Example: Session has CURRENT LIVE ORDER Cloudy Brown x1 + Bloom White x2; customer "white eken oni, brown ain karanna" → intent=edit_cart, remove Brown (or recolor that line to White), keep other lines — use live order productIds.
+- Color replace (critical): "White color eka epa. Eka ain karala brown 3k ekathukaranna" with cart Cloudy White x1 → intent=edit_cart, operation=add, items=[{Cloudy, Brown, qty:3}], target={color:"White"} (server removes White then upserts Brown×3). Do NOT use replace_qty (that keeps White and only changes qty).
 - operation meanings (critical — wrong op doubles qty):
   - set = new quote / replace whole cart with items[]
-  - add = ADD extra bags ("white bag ekakuth", "thawa pink 1k", "me bag ekath denna", "another black"). qty = pieces to ADD (default 1), NOT a new cart total.
+  - add = ADD extra bags ("white bag ekakuth", "thawa pink 1k", "me bag ekath denna", "another black"). qty = pieces to ADD (default 1), NOT a new cart total. Also used with target=color-to-remove for color replace.
   - add_qty = increase qty by N ("thawa ekak", "one more") without stating a final total
-  - replace_qty = SET qty to the number they stated for a bag already in cart ("Pink bag 2i oni", "pink 2k denna", "qty eka 2"). Use this when they restate how many they want — NEVER add in that case.
-  - remove = drop a bag/color from cart or live order
+  - replace_qty = SET qty to the number they stated for a bag already in cart ("Pink bag 2i oni", "pink 2k denna", "qty eka 2"). Use this when they restate how many they want — NEVER add in that case. NEVER use replace_qty when removing one color and adding another.
+  - remove = drop a bag/color from cart or live order (pure remove only — no replacement color)
 - Example bug to avoid: cart already has Pink qty 2; customer says "Pink bag 2i oni. Meke 4k thiynawane" → operation=replace_qty, qty=2 (NOT add — add would make 4).
 - Example bug to avoid: swipe-reply "Me bag ekath denna" → operation=add, items=[that bag qty 1] only (do NOT list the whole prior cart again).
 - Prices in the catalog are for your understanding only — do NOT invent different prices; the server will quote from the database.

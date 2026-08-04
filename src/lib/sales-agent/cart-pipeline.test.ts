@@ -3,16 +3,19 @@ import { parseCartIntentJson } from './cart-intent-extract'
 import {
   applyCartOperationToPending,
   applyColorOnlyToPending,
+  applyColorReplaceToPending,
   applyColorSwapToPending,
   canonicalizeExtractedColor,
   checkQuoteCompleteness,
   coerceCartOperation,
   combineConfidence,
   heuristicLinesFromText,
+  isColorReplaceEdit,
   looksLikeAbsoluteQtyDesire,
   looksLikeColorRemoveRequest,
   mergePhotoPendingIntoResolved,
   parseColorSwapRequest,
+  pickRemoveColorFromText,
   resolveExtractionItems,
   resolveMentionedProduct,
   validateProductColor,
@@ -678,6 +681,14 @@ describe('color swap brown→white', () => {
     expect(swap?.remove.toLowerCase()).toBe('brown')
   })
 
+  it('parses White epa + brown ekathukaranna as remove White want Brown', () => {
+    const swap = parseColorSwapRequest(
+      'White color eka epa. Eka ain karala brown 3k ekathukaranna',
+    )
+    expect(swap?.remove.toLowerCase()).toBe('white')
+    expect(swap?.want.toLowerCase()).toBe('brown')
+  })
+
   it('recolors brown lines to white and keeps other bags', () => {
     const next = applyColorSwapToPending(
       [
@@ -702,5 +713,110 @@ describe('color swap brown→white', () => {
     expect(next.find((l) => l.productId === 'bloom-1')?.qty).toBe(2)
     expect(next.find((l) => l.productId === 'cloudy-1')?.color).toBe('White')
     expect(next.find((l) => l.productId === 'cloudy-1')?.qty).toBe(1)
+  })
+})
+
+describe('color replace White→Brown with qty (regression)', () => {
+  const burst =
+    'White color eka epa. Eka ain karala brown 3k ekathukaranna'
+  const existing = [
+    {
+      productId: 'shoulder-1',
+      name: 'Shoulder Bag',
+      color: 'Red',
+      qty: 2,
+      price: 850,
+    },
+    {
+      productId: 'cloudy-1',
+      name: 'Cloudy Shoulder Bag',
+      color: 'White',
+      qty: 1,
+      price: 990,
+    },
+  ]
+  const incomingBrown: ResolvedCartLine[] = [
+    {
+      productId: 'cloudy-1',
+      name: 'Cloudy Shoulder Bag',
+      color: 'Brown',
+      qty: 3,
+      confidence: 0.95,
+    },
+  ]
+
+  it('pickRemoveColorFromText finds White from epa clause', () => {
+    expect(pickRemoveColorFromText(burst)?.toLowerCase()).toBe('white')
+  })
+
+  it('detects color-replace edit from extract-shaped input', () => {
+    expect(
+      isColorReplaceEdit({
+        burstText: burst,
+        removeColor: 'White',
+        incoming: incomingBrown,
+        existing,
+      }),
+    ).toBe(true)
+  })
+
+  it('removes White and upserts Brown×3 keeping Red', () => {
+    const next = applyColorReplaceToPending(existing, incomingBrown, 'White')
+    expect(next).toHaveLength(2)
+    expect(next.find((l) => l.color === 'Red')?.qty).toBe(2)
+    expect(next.find((l) => l.color === 'White')).toBeUndefined()
+    expect(next.find((l) => l.color === 'Brown')?.qty).toBe(3)
+    expect(next.find((l) => l.productId === 'cloudy-1')?.color).toBe('Brown')
+  })
+
+  it('does not coerce add→replace_qty when color is changing', () => {
+    // Photo-merge can inject Red; overlaps must not force replace_qty on White
+    const mergedIncoming: ResolvedCartLine[] = [
+      {
+        productId: 'shoulder-1',
+        name: 'Shoulder Bag',
+        color: 'Red',
+        qty: 2,
+        confidence: 1,
+      },
+      ...incomingBrown,
+    ]
+    expect(
+      coerceCartOperation({
+        burstText: burst,
+        operation: 'add',
+        intent: 'edit_cart',
+        existing,
+        incoming: mergedIncoming,
+      }),
+    ).toBe('add')
+  })
+
+  it('still coerces Pink 2i oni → replace_qty (same color restatement)', () => {
+    expect(
+      coerceCartOperation({
+        burstText: 'Pink bag 2i oni. Meke 4k thiynawane',
+        operation: 'add',
+        intent: 'edit_cart',
+        existing: [
+          {
+            productId: 'mini-1',
+            name: 'Mini Shoulder Bag',
+            color: 'Pink',
+            qty: 2,
+            price: 990,
+          },
+        ],
+        incoming: [
+          {
+            productId: 'mini-1',
+            name: 'Mini Shoulder Bag',
+            color: 'Pink',
+            qty: 2,
+            confidence: 0.95,
+          },
+        ],
+      }),
+    ).toBe('replace_qty')
   })
 })
