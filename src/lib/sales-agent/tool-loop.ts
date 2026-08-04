@@ -39,6 +39,7 @@ import {
 } from '@/lib/ai/providers/gemini'
 import { AiError } from '@/lib/ai/types'
 import type { MatchableQuickReply } from './match-products'
+import { formatProductCatalogLine } from './match-products'
 import type { CustomQuickReply } from './match-custom-qr'
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
@@ -104,12 +105,7 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
 
   const productList = productCatalog
     .slice(0, 60)
-    .map(
-      (q) =>
-        `- ${q.title} | id=${q.id}` +
-        (q.product_id ? ` | product=${q.product_id}` : '') +
-        (q.catalog_message_id ? ` | catalog=${q.catalog_message_id}` : ''),
-    )
+    .map((q) => formatProductCatalogLine(q))
     .join('\n')
 
   const faqList = customCatalog
@@ -135,6 +131,7 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
     'You MAY call multiple tools in the same turn for mixed intents (e.g. find_product + generate_quote + answer_delivery).',
     'You have up to 3 tool rounds this turn. If a tool returns need=quick_reply_id or "not found", pick a better id from the FAQ list and retry — or call handover_to_human.',
     'Prefer tools over guessing. Never invent catalog prices, delivery times, or return policies.',
+    'Product catalog (from ladiesbags.lk admin): each line has bag name, retail price, and available colors — use these for accurate quotes/colors; do not invent prices or colors not listed.',
     'FAQ / delivery / policy answers:',
     '- Read every FAQ description below carefully (Singlish/English).',
     '- Choose the single most suitable quick reply for the customer question.',
@@ -169,7 +166,7 @@ function buildAgentSystemPrompt(args: ToolLoopArgs): string {
       : '',
     args.systemExtra?.trim() ? `Session state:\n${args.systemExtra.trim()}` : '',
     productList
-      ? `Catalog product cards (use find_product / generate_quote):\n${productList}`
+      ? `Catalog products (bag name · retail price · colors — from ladiesbags.lk/admin):\n${productList}`
       : 'No product cards configured.',
     faqList
       ? `FAQ / policy / delivery quick replies (YOU pick the best id by description):\n${faqList}`

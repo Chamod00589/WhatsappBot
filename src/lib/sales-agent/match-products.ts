@@ -1,4 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import {
+  fetchCatalogProducts,
+  type CatalogProduct,
+} from '@/lib/catalog/products'
 import { normalizeMatchText } from './normalize'
 
 export interface MatchableQuickReply {
@@ -10,6 +14,10 @@ export interface MatchableQuickReply {
   catalog_message_id: string | null
   /** Derived search needles (normalized). */
   needles: string[]
+  /** From ladiesbags.lk admin products (retail catalog). */
+  bagName?: string | null
+  retailPrice?: number | null
+  colors?: string[]
 }
 
 const TITLE_NOISE =
@@ -71,6 +79,78 @@ export async function loadProductQuickReplies(
       ...r,
       needles: buildProductNeedles(r.title, r.product_id),
     }))
+}
+
+/**
+ * Attach bag name / retail price / colors from ladiesbags.lk `/api/products`
+ * (same source as https://www.ladiesbags.lk/admin products).
+ */
+export async function enrichProductsWithCatalogDetails(
+  products: MatchableQuickReply[],
+): Promise<MatchableQuickReply[]> {
+  if (!products.length) return products
+  let catalog: CatalogProduct[] = []
+  try {
+    catalog = await fetchCatalogProducts()
+  } catch (err) {
+    console.warn(
+      '[sales-agent] catalog products fetch failed — agent list without prices/colors:',
+      err,
+    )
+    return products
+  }
+  if (!catalog.length) return products
+
+  const byId = new Map(catalog.map((p) => [p.id, p]))
+  const byName = new Map(
+    catalog.map((p) => [normalizeMatchText(p.name), p] as const),
+  )
+
+  return products.map((qr) => {
+    const fromId = qr.product_id ? byId.get(qr.product_id) : undefined
+    const titleName = productNameFromTitle(qr.title)
+    const fromName =
+      fromId ||
+      byName.get(normalizeMatchText(titleName)) ||
+      catalog.find((p) => {
+        const pn = normalizeMatchText(p.name)
+        const tn = normalizeMatchText(titleName)
+        return pn.includes(tn) || tn.includes(pn)
+      })
+    if (!fromName) {
+      return {
+        ...qr,
+        bagName: titleName || qr.title,
+      }
+    }
+    return {
+      ...qr,
+      bagName: fromName.name,
+      retailPrice: fromName.price,
+      colors: fromName.colors,
+      needles: buildProductNeedles(fromName.name, fromName.id, qr.needles),
+    }
+  })
+}
+
+/** One-line catalog blurb for the Sales Agent system prompt. */
+export function formatProductCatalogLine(q: MatchableQuickReply): string {
+  const name =
+    (q.bagName || productNameFromTitle(q.title) || q.title).trim() || q.title
+  const price =
+    typeof q.retailPrice === 'number' && q.retailPrice > 0
+      ? `Rs ${q.retailPrice.toLocaleString('en-US')}`
+      : 'price unknown'
+  const colors =
+    q.colors && q.colors.length
+      ? q.colors.join(', ')
+      : 'colors unknown'
+  return (
+    `- ${name} | retail=${price} | colors=${colors}` +
+    ` | id=${q.id}` +
+    (q.product_id ? ` | product=${q.product_id}` : '') +
+    (q.catalog_message_id ? ` | catalog=${q.catalog_message_id}` : '')
+  )
 }
 
 /**

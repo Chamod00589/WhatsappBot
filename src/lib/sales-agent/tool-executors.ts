@@ -21,6 +21,7 @@ import {
   type CustomQuickReply,
 } from './match-custom-qr'
 import {
+  enrichProductsWithCatalogDetails,
   loadProductQuickReplies,
   matchProductByIdentifyName,
   matchProductsInText,
@@ -1118,9 +1119,10 @@ export async function loadAgentCatalogs(
   products: MatchableQuickReply[]
   customs: CustomQuickReply[]
 }> {
-  const [products, customs] = await Promise.all([
+  const [rawProducts, customs] = await Promise.all([
     loadProductQuickReplies(db, accountId),
     loadCustomQuickReplies(db, accountId),
   ])
+  const products = await enrichProductsWithCatalogDetails(rawProducts)
   return { products, customs }
 }
