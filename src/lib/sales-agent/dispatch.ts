@@ -603,6 +603,10 @@ export async function dispatchSalesAgentNow(
           // Color-only / heuristic path inside pipeline even when LLM says none
           Boolean(burstText.trim())
         ) {
+          const recentCustomerMsgs = loopMessages
+            .filter((m) => m.role === 'user')
+            .map((m) => m.content)
+            .slice(-6)
           const pipe = await runCartPipeline({
             db,
             accountId,
@@ -617,6 +621,8 @@ export async function dispatchSalesAgentNow(
             quotationEnabled: Boolean(config.quotation),
             editOrderEnabled: Boolean(config.editOrder),
             burstText,
+            aiConfig: config,
+            recentCustomerMsgs,
           })
           cartHandled = pipe.handled
           if (pipe.quoted) quoteSentThisTurn = true
@@ -629,6 +635,7 @@ export async function dispatchSalesAgentNow(
               clarified: pipe.clarified,
               updated: pipe.updated,
               clarifyReason: pipe.clarifyReason,
+              verify: pipe.verify || null,
             },
           )
           if (pipe.handled) {

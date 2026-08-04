@@ -28,6 +28,11 @@ import {
 } from './match-products'
 import { normalizeMatchText } from './normalize'
 import type { ReplyMode } from './language'
+import type { AiConfig } from '@/lib/ai/types'
+import {
+  verifyCartChange,
+  type CartLineSnapshot,
+} from './cart-change-verify'
 
 /** Architecture confidence gates (0–1). */
 export const CART_CONFIDENCE_AUTO = 0.9
@@ -164,6 +169,7 @@ export type CartClarifyReason =
   | 'invalid_qty'
   | 'incomplete'
   | 'unknown_product'
+  | 'verify_failed'
 
 export type CartPipelineResult = {
   handled: boolean
@@ -173,6 +179,14 @@ export type CartPipelineResult = {
   message: string
   clarifyReason?: CartClarifyReason
   lines?: ResolvedCartLine[]
+  /** Debug: old→new verify outcome before send. */
+  verify?: {
+    ok: boolean
+    source: string
+    reason?: string
+    oldItems?: Array<{ name: string; color?: string; qty: number }>
+    newItems?: Array<{ name: string; color?: string; qty: number }>
+  }
 }
 
 /**
@@ -936,6 +950,10 @@ export async function runCartPipeline(args: {
   editOrderEnabled: boolean
   /** Latest customer burst — used for color-only replies + heuristic parse. */
   burstText?: string
+  /** AI config for edit verify LLM (optional). */
+  aiConfig?: AiConfig | null
+  /** Recent customer texts for verify context. */
+  recentCustomerMsgs?: string[]
 }): Promise<CartPipelineResult> {
   const {
     db,
@@ -996,10 +1014,58 @@ export async function runCartPipeline(args: {
     existingPending = orderItemsToPendingQuoted(raw)
   }
 
+  const oldCartSnapshot: CartLineSnapshot[] = existingPending.map((it) => ({
+    productId: it.productId,
+    name: it.name,
+    color: it.color,
+    qty: it.qty,
+  }))
+
   // Deterministic color swap ("white eken + brown ain") on live order / cart
   if (colorSwap && existingPending.length && editOrderEnabled && recentOrder) {
     const swapped = applyColorSwapToPending(existingPending, colorSwap)
     if (swapped !== existingPending) {
+      const verify = await verifyCartChange({
+        oldItems: oldCartSnapshot,
+        newItems: swapped.map((it) => ({
+          productId: it.productId,
+          name: it.name,
+          color: it.color,
+          qty: it.qty,
+        })),
+        customerText: burstText,
+        operation: 'set',
+        intent: 'edit_cart',
+        useSinglish,
+        config: args.aiConfig,
+        recentCustomerMsgs: args.recentCustomerMsgs,
+      })
+      if (!verify.ok) {
+        await sendClarify(args, verify.message)
+        return {
+          handled: true,
+          quoted: false,
+          clarified: true,
+          updated: false,
+          message: verify.message,
+          clarifyReason: 'verify_failed',
+          verify: {
+            ok: false,
+            source: verify.source,
+            reason: verify.reason,
+            oldItems: oldCartSnapshot.map((i) => ({
+              name: i.name,
+              color: i.color || undefined,
+              qty: i.qty,
+            })),
+            newItems: swapped.map((i) => ({
+              name: i.name,
+              color: i.color || undefined,
+              qty: i.qty,
+            })),
+          },
+        }
+      }
       const r = await actionUpdateOrderItems({
         db,
         accountId: args.accountId,
@@ -1024,9 +1090,10 @@ export async function runCartPipeline(args: {
         clarified: false,
         updated: r.ok,
         message: r.ok
-          ? `${r.message} (color swap ${colorSwap.remove}→${colorSwap.want})`
+          ? `${r.message} (color swap ${colorSwap.remove}→${colorSwap.want}; verified=${verify.source})`
           : r.message,
         lines: pendingToResolved(swapped),
+        verify: { ok: true, source: verify.source },
       }
     }
   }
@@ -1349,6 +1416,67 @@ export async function runCartPipeline(args: {
     }
   }
 
+  // Verify old→new vs customer request before sending quote/order update
+  const newSnap: CartLineSnapshot[] = workingLines.map((l) => ({
+    productId: l.productId,
+    name: l.name,
+    color: l.color,
+    qty: l.qty,
+  }))
+  const cartSig = (items: CartLineSnapshot[]) =>
+    items
+      .map(
+        (i) =>
+          `${(i.productId || normalizeMatchText(i.name)).toLowerCase()}|${normalizeMatchText(i.color || '')}|${Math.max(1, Number(i.qty) || 1)}`,
+      )
+      .sort()
+      .join(';')
+  const isEditSend =
+    oldCartSnapshot.length > 0 &&
+    operation !== 'remove' &&
+    cartSig(oldCartSnapshot) !== cartSig(newSnap)
+  let verifyMeta: CartPipelineResult['verify']
+  if (isEditSend) {
+    const verify = await verifyCartChange({
+      oldItems: oldCartSnapshot,
+      newItems: newSnap,
+      customerText: burstText,
+      operation,
+      intent: extraction.intent,
+      useSinglish,
+      config: args.aiConfig,
+      recentCustomerMsgs: args.recentCustomerMsgs,
+    })
+    verifyMeta = {
+      ok: verify.ok,
+      source: verify.source,
+      reason: verify.ok ? undefined : verify.reason,
+      oldItems: oldCartSnapshot.map((i) => ({
+        name: i.name,
+        color: i.color || undefined,
+        qty: i.qty,
+      })),
+      newItems: newSnap.map((i) => ({
+        name: i.name,
+        color: i.color || undefined,
+        qty: i.qty,
+      })),
+    }
+    if (!verify.ok) {
+      await sendClarify(args, verify.message)
+      return {
+        handled: true,
+        quoted: false,
+        clarified: true,
+        updated: false,
+        message: verify.message,
+        clarifyReason: 'verify_failed',
+        lines: workingLines,
+        verify: verifyMeta,
+      }
+    }
+  }
+
   // Live order edit path
   if (extraction.intent === 'edit_cart' && editOrderEnabled) {
     const recent = recentOrder || (await findRecentOrderForPhone(args.contactPhone))
@@ -1393,6 +1521,48 @@ export async function runCartPipeline(args: {
             message: text,
           }
         }
+        const remainingSnap: CartLineSnapshot[] = remaining.map((it) => ({
+          productId: typeof it.productId === 'string' ? it.productId : undefined,
+          name: String(it.name || 'Bag'),
+          color: String(it.color || ''),
+          qty: Math.max(1, Number(it.quantity) || 1),
+        }))
+        const removeVerify = await verifyCartChange({
+          oldItems: oldCartSnapshot,
+          newItems: remainingSnap,
+          customerText: burstText,
+          operation: 'remove',
+          intent: 'edit_cart',
+          useSinglish,
+          config: args.aiConfig,
+          recentCustomerMsgs: args.recentCustomerMsgs,
+        })
+        if (!removeVerify.ok) {
+          await sendClarify(args, removeVerify.message)
+          return {
+            handled: true,
+            quoted: false,
+            clarified: true,
+            updated: false,
+            message: removeVerify.message,
+            clarifyReason: 'verify_failed',
+            verify: {
+              ok: false,
+              source: removeVerify.source,
+              reason: removeVerify.reason,
+              oldItems: oldCartSnapshot.map((i) => ({
+                name: i.name,
+                color: i.color || undefined,
+                qty: i.qty,
+              })),
+              newItems: remainingSnap.map((i) => ({
+                name: i.name,
+                color: i.color || undefined,
+                qty: i.qty,
+              })),
+            },
+          }
+        }
         const r = await actionUpdateOrderItems({
           db,
           accountId: args.accountId,
@@ -1416,8 +1586,11 @@ export async function runCartPipeline(args: {
           quoted: false,
           clarified: false,
           updated: r.ok,
-          message: r.message,
+          message: r.ok
+            ? `${r.message} (verified=${removeVerify.source})`
+            : r.message,
           lines: workingLines,
+          verify: { ok: true, source: removeVerify.source },
         }
       }
 
@@ -1443,8 +1616,11 @@ export async function runCartPipeline(args: {
         quoted: false,
         clarified: false,
         updated: r.ok,
-        message: r.message,
+        message: r.ok
+          ? `${r.message}${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
+          : r.message,
         lines: workingLines,
+        verify: verifyMeta,
       }
     }
   }
@@ -1522,8 +1698,11 @@ export async function runCartPipeline(args: {
       quoted: r.ok,
       clarified: false,
       updated: r.ok,
-      message: r.message,
+      message: r.ok
+        ? `${r.message}${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
+        : r.message,
       lines: workingLines,
+      verify: verifyMeta,
     }
   }
 
@@ -1542,8 +1721,11 @@ export async function runCartPipeline(args: {
     quoted: r.ok,
     clarified: false,
     updated: r.ok,
-    message: r.message,
+    message: r.ok
+      ? `${r.message}${verifyMeta ? ` (verified=${verifyMeta.source})` : ''}`
+      : r.message,
     lines: workingLines,
+    verify: verifyMeta,
   }
 }
 
